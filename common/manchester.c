@@ -44,7 +44,7 @@
 
 // in us
 #define WINDOW_BEFORE 9   // MAX 10
-#define WINDOW_AFTER  9  
+#define WINDOW_AFTER  9
 
 
 #define ONE()  sbi(MANCH_OUTPORT, MANCH_OUTPIN);
@@ -112,21 +112,21 @@ uint8_t manchester_receive(data_t* data)  // Function call 4 clk, function overh
 	// Require two successive high readings.
 	// LOOP: SBIS 2 + SBIC 2 + SUBI 1 + BRCC 2 = 7 clk /round.
 	time_tmp = 24;	//167/7 would be 23.85, round to 24.
-	
+
 	while(time_tmp--)
 	{
 		if(pinstat && pinstat)
 			goto OK1;
-		
+
 	}
-	
+
 	PULLUP_ON();
 	return 2;
 
 	OK1:
-	
+
 	// Now we are exactly aligned at first '1', which is discarded.
-	
+
 	_delay_us(10.125 + 1.5); // Compensation for CRC delay, see below.
 	                         // +1.5 = measured correction.
 
@@ -151,7 +151,7 @@ uint8_t manchester_receive(data_t* data)  // Function call 4 clk, function overh
 			if(!pinstat)
 				n_low_readings++;
 		} // 40 clk = 5 us.
-		
+
 
 		// Num of zeroes: 0  1  2   3  4   5  6  7
 		//                H I G H | ?  ? | L  O  W
@@ -259,7 +259,7 @@ uint8_t manchester_send(data_t data)
 	// Grand total 48+24+3 = 75 cycles = 9.375 us.
 
 	del_us(25 - 9.375);
-		
+
 
 	for(int i = 8; i > 0; --i)
 	{
@@ -340,7 +340,7 @@ uint8_t manchester_send(data_t data)
 	}
 
 
-	ONE(); // linja ylös lopuksi
+	ONE();
 
 	return COMM_SUCCESS;
 
