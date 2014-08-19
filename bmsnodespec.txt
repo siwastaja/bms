@@ -1,0 +1,150 @@
+- All nodes form a unidirectional point-to-point chain, starting from master unit, through all
+nodes, and ending back to master unit. (Master typically is a larger microprocessor, etc.)
+
+- Communication is level-shifted by capacitor coupling and uses Manchester encoding (rising edge
+= '1') for DC level removal and robust clocking. The data rate is 40 ksymbols/s (20 kbit/s).
+
+- All transactions are 1+32=33 bits (66 symbols) in length. Data transmission starts with high-to-low
+edge followed by low-to-high edge after 1 communication clock cycle, which is a start bit ('1').
+
+- Communication requires that the cell voltage difference between two adjacent cells is no more than
+approx. 40% of the lower cell voltage, e.g., 3.0V and 2.2V is on the brink of failing, which can happen
+during heavy discharge at the end of SoC if the cells differ a lot in their internal resistance and 
+capacity. In this case, the communication results in a framing or CRC error which is reported forward
+by the latter node. These errors, if they repeat, should be treated as Low-Voltage/High-Voltage 
+Cutoff events.
+
+- Nodes normally send nothing without being asked to by the master. They are as stateless as
+possible, and return to sleep state automatically.
+
+- Nodes must be numbered in sequential order, i.e., the first node to receive from master has
+the lowest number (preferably 1). (While this is not technically necessary with the current
+revision, this condition must be kept for future compatibility and just to enforce the
+only sane way to physically find the relevant nodes in case of troubleshooting.)
+
+- No node-to-node communication: this enables using a single, combined src/dst field, as nodes send
+  only to the master and there are no duplicate node ids. There is a master bit
+  to identify between master and node originated messages.
+
+- If the received node ID doesn't match with the node's own, the message is relayed as is.
+
+
+- In case of a broadcast message, node first does what it is asked to and sends the reply to master.
+Then, the original message is relayed. This allows broadcast messages to be used to measure all node
+voltages/etc. with minimum effort without interrupting nodes with incoming data while they are processing.
+
+- Operations are guaranteed to take a predefined, constant amount of clock cycles (or very nearly so).
+ Note that actual times may differ a little due to the difference in internal RC oscillator frequency.
+  
+
+ 31 30 29 28 27 26 25 24 23 22 21 20 19 18 17 16 15 14 13 12 11 10  9  8  7  6  5  4  3  2  1  0
+|-----------------------|-----------------------------------------------|------------------------|
+| DST / SRC ID  8 bit   |          Payload 2 bytes (16 bit)             | CRC8                   |
+|-----------------------|-----------------------------------------------|------------------------|
+      = addr                     = cmd                 = val                   = crc
+
+Addresses: 
+0 = master
+1...253 = nodes. Sequential order required.
+254 = default node ID when nodes are programmed. Nodes default to this ID if the node boots with
+      eeprom corrupted at the node address location.
+255 = broadcast (to all nodes)
+
+
+Master sends "commands". Highest bit of cmd = '1' to denote master-originated message.
+
+Nodes send either relayed master messages (exactly as received) or "replies". Highest bit
+of cmd = '0' (node-originated message). Bits 6..2 = message type. 
+cmd[1..0] + val = 10-bit value. 
+
+
+Commands (master sends):
+
+Command(*1)         Description                       Data byte
+
+0x80- 0b100abcde  Measure & Report                    Power consumption leveling(*2) 
+ 0x9f         ^^--de: 00 voltage 01 ext sens 10 int temp 11 reserved
+             ^----c: Vref 0 = 1.1V (voltage, int temp), 1 = Vcc (ext sens)
+            ^-----b: Use offset calibration stored in EEPROM
+           ^------a: Long measurement:
+                     - First reports the result of PREVIOUS such operation
+                     - Then relays the message, if broadcast address
+                     - Then starts long measurement (approx 800 ms). Incoming data
+                       ignored (or measurement slightly messed up?) during this. 
+                       Then goes back to sleep. 
+                     - During long measurement, subsequent results are averaged.
+                     TODO: Is this good?
+
+0xa0- 0b101000ab  Consume power                       Number of seconds until automatic stop
+ 0xaf          ^--b: Use LED (+ ~ 20 mA)
+              ^---c: Use V meas resistor divider (+ ~ 25 mA)
+           ^^^----Reserved, write as 0
+
+0xb0  0b10110000  Change node ID                      New ID (*3)
+0xb1  0b10110001  Enable EEPROM write access          EEPROM address for next write operation
+0xb2  0b10110010  Write EEPROM byte                   Data byte
+0xb3  0b10110011  Set brown-out detector state        0 = disable, 1 = enable (default) (*4)
+0xb4  0b10110100  Reload variables from EEPROM
+                    - Calibration offsets
+                    - Node ID
+                    Use this if you changed node ID using Write Eeprom insted of Change Node ID
+                    or if you have changed calibration values.
+               
+0xc0- 0b1100abcd  Read EEPROM                         EEPROM start address
+0xcf        ^^^^--abcd+1=num bytes (1-16) 
+
+0xd0-0xff Reserved for future use
+
+
+*1) First byte includes the master bit
+*2) Used when broadcast-measuring voltages/temperatures. Fill this byte with the number of nodes
+    in system. Node consumes extra power by blinking the LED, defined by this value, so that 1 unit
+    equals to power consumed by 1 node to relay the message. Every node to receive this measurement command
+    decrements the data byte, so that all nodes end up using approx. the same power for the measurement round.
+*3) The field is incremented by the node when used as a broadcast message, enabling automatic sequencing of the nodes.
+*4) Brown-out detector can be disabled to really minimize current consumption (from ~20 uA to ~1 uA).
+    TODO: Is it re-enabled in reset?
+
+----------------
+Node replies:
+----------------
+
+- Measurement result (10-bit data)
+- EEPROM data (8-bit data)
+- Operation success (8-bit data with the original command byte)
+- Operation error (8-bit error code)
+- Communication error (8-bit error code)
+
+
+Identifier(*1)         Description                       Data byte
+
+0x00  0b00000000       Operation Success                 Original command byte
+0x01  0b00000001       Operation Not Allowed             Original command byte
+0x02  0b00000010       Unknown Command                   Original command byte
+0x03  0b00000011       Communication error               Error code(*2)
+0x04  0b00000100       EEPROM read checksum error        Eeprom address
+0x05- 0b000001xx       Reserved for future error codes
+ 0x07
+
+0x10- 0b0001abcd       EEPROM data                       Data value
+ 0x1f       ^^^^-------abcd: Number of byte in read sequence.
+
+0x70- 0b01abcdef       Measurement data                  8 lowest bits of value
+ 0x7f       ^^^^-------cdef: 4 MSbits of value.
+          ^^-----------ab: 00 voltage 01 ext sens 10 int temp 11 reserved
+     12-bit value is left-aligned. In normal measurement, two lowest bits are always zero.
+        Long measurement mode allows more resolution (by summing results of multiple measurements).
+        The ADC resolution is still 10 bits.
+
+
+*1) MSB always '0' to denote node-originated communication
+
+*2) Communication error codes:
+0x01 Reserved for a future error
+0x02 Framing: First 0->1 transition not detected within time window
+0x03-0x1f: Reserved for future errors
+0x20-0x3f: Framing: No steady level detected between transitions. 5 lsbits = bit index
+0x40-0x5f: Framing: High-low transition not detected within time window. 5 lsbits = bit index
+0x60-0x7f: Framing: Low-high transition not detected within time window. 5 lsbits = bit index
+0x80-0xfe: Reserved for future errors
+0xff: CRC error
