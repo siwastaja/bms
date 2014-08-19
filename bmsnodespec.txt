@@ -12,7 +12,7 @@ approx. 40% of the lower cell voltage, e.g., 3.0V and 2.2V is on the brink of fa
 during heavy discharge at the end of SoC if the cells differ a lot in their internal resistance and 
 capacity. In this case, the communication results in a framing or CRC error which is reported forward
 by the latter node. These errors, if they repeat, should be treated as Low-Voltage/High-Voltage 
-Cutoff events.
+Cutoff events. (If the voltage difference is even higher, > 45%, messages may go unnoticed.)
 
 - Nodes normally send nothing without being asked to by the master. They are as stateless as
 possible, and return to sleep state automatically.
@@ -27,7 +27,6 @@ only sane way to physically find the relevant nodes in case of troubleshooting.)
   to identify between master and node originated messages.
 
 - If the received node ID doesn't match with the node's own, the message is relayed as is.
-
 
 - In case of a broadcast message, node first does what it is asked to and sends the reply to master.
 Then, the original message is relayed. This allows broadcast messages to be used to measure all node
@@ -54,11 +53,11 @@ Addresses:
 Master sends "commands". Highest bit of cmd = '1' to denote master-originated message.
 
 Nodes send either relayed master messages (exactly as received) or "replies". Highest bit
-of cmd = '0' (node-originated message). Bits 6..2 = message type. 
-cmd[1..0] + val = 10-bit value. 
+of cmd = '0' (node-originated message).
 
-
+--------------------------
 Commands (master sends):
+--------------------------
 
 Command(*1)         Description                       Data byte
 
@@ -69,11 +68,10 @@ Command(*1)         Description                       Data byte
            ^------a: Long measurement:
                      - First reports the result of PREVIOUS such operation
                      - Then relays the message, if broadcast address
-                     - Then starts long measurement (approx 800 ms). Incoming data
-                       ignored (or measurement slightly messed up?) during this. 
-                       Then goes back to sleep. 
-                     - During long measurement, subsequent results are averaged.
-                     TODO: Is this good?
+                     - Then starts long measurement (max 250 ms). Incoming data
+                       ignored during this time. Then goes back to sleep. 
+                     - During long measurement, subsequent 10-bit results are averaged
+                       into one 12-bit value (2048 measurements).
 
 0xa0- 0b101000ab  Consume power                       Number of seconds until automatic stop
  0xaf          ^--b: Use LED (+ ~ 20 mA)
@@ -114,13 +112,6 @@ Command(*1)         Description                       Data byte
 Node replies:
 ----------------
 
-- Measurement result (10-bit data)
-- EEPROM data (8-bit data)
-- Operation success (8-bit data with the original command byte)
-- Operation error (8-bit error code)
-- Communication error (8-bit error code)
-
-
 Identifier(*1)         Description                       Data byte
 
 0x00  0b00000000       Operation Success                 Original command byte
@@ -129,13 +120,13 @@ Identifier(*1)         Description                       Data byte
 0x03  0b00000011       Communication error               Error code(*2)
 0x04  0b00000100       EEPROM read checksum error        Eeprom address
 0x05  0b00000101       Node SW version                   Version number (1-255)
-0x06- 0b000001xx       Reserved
- 0x07
+0x06  0b00000110       Reserved
+0x07  0b00000111       Reserved
 
-0x10- 0b0001abcd       EEPROM data                       Data value
+0x10- 0b0001abcd       EEPROM data                       Data byte
  0x1f       ^^^^-------abcd: Number of byte in read sequence.
 
-0x70- 0b01abcdef       Measurement data                  8 lowest bits of value
+0x70- 0b01abcdef       Measurement data                  8 LSbits of value
  0x7f       ^^^^-------cdef: 4 MSbits of value.
           ^^-----------ab: 00 voltage 01 ext sens 10 int temp 11 reserved
      12-bit value is left-aligned. In normal measurement, two lowest bits are always zero.
