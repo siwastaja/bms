@@ -64,7 +64,7 @@ Command(*1)         Description                       Data byte
 
 0x80- 0b100abcde  Measure & Report                    Power consumption leveling(*2) 
  0x9f         ^^--de: 00 voltage 01 ext sens 10 int temp 11 reserved
-             ^----c: Vref 0 = 1.1V (voltage, int temp), 1 = Vcc (ext sens)
+             ^----c: Vref 0 = Vcc (ext sens), 1 = 1.1V (volt, int temp)
             ^-----b: Use offset calibration stored in EEPROM
            ^------a: Long measurement:
                      - First reports the result of PREVIOUS such operation
@@ -78,17 +78,21 @@ Command(*1)         Description                       Data byte
 0xa0- 0b101000ab  Consume power                       Number of seconds until automatic stop
  0xaf          ^--b: Use LED (+ ~ 20 mA)
               ^---c: Use V meas resistor divider (+ ~ 25 mA)
-           ^^^----Reserved, write as 0
+            ^^----Reserved, write as 0
 
 0xb0  0b10110000  Change node ID                      New ID (*3)
 0xb1  0b10110001  Enable EEPROM write access          EEPROM address for next write operation
 0xb2  0b10110010  Write EEPROM byte                   Data byte
-0xb3  0b10110011  Set brown-out detector state        0 = disable, 1 = enable (default) (*4)
+0xb3  0b10110011  Set state                           Bit 0: BOD disable(*4) (0=don't disable(default), 1=disable)
+                                                      Bit 1: Debug mode(*5)  (0=off(default), 1=on)
+
 0xb4  0b10110100  Reload variables from EEPROM
                     - Calibration offsets
                     - Node ID
                     Use this if you changed node ID using Write Eeprom insted of Change Node ID
-                    or if you have changed calibration values.
+                    or if you have changed calibration values and don't want to cycle power.
+
+0xb5  0b10110101  Report node SW version
                
 0xc0- 0b1100abcd  Read EEPROM                         EEPROM start address
 0xcf        ^^^^--abcd+1=num bytes (1-16) 
@@ -104,6 +108,7 @@ Command(*1)         Description                       Data byte
 *3) The field is incremented by the node when used as a broadcast message, enabling automatic sequencing of the nodes.
 *4) Brown-out detector can be disabled to really minimize current consumption (from ~20 uA to ~1 uA).
     TODO: Is it re-enabled in reset?
+*5) Debug mode blinks LED in data transactions etc. Nice demo.
 
 ----------------
 Node replies:
@@ -123,7 +128,8 @@ Identifier(*1)         Description                       Data byte
 0x02  0b00000010       Unknown Command                   Original command byte
 0x03  0b00000011       Communication error               Error code(*2)
 0x04  0b00000100       EEPROM read checksum error        Eeprom address
-0x05- 0b000001xx       Reserved for future error codes
+0x05  0b00000101       Node SW version                   Version number (1-255)
+0x06- 0b000001xx       Reserved
  0x07
 
 0x10- 0b0001abcd       EEPROM data                       Data value

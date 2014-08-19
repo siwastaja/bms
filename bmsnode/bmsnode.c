@@ -1,6 +1,3 @@
-// 2014-07-13: Changed pin mappings + LED to active low for new PCB layout.
-// 2014-05-31: Doubled shunting current by utilizing measurement resistors.
-
 // EEPROM MAP
 // Addr+1 is always a "checksum" of the previous 8-bit val (inverse)
 // All values are 8-bit, starting at even addresses.
@@ -9,16 +6,18 @@
 // 0x04: Num of external resets
 // 0x06: Num of brown-out resets
 // 0x08: Num of watchdog resets
-// After counting to 255, 0 is skipped.
-// 0x0a: Set to 123 for debug mode (blink LED more). Set to any other value to disable.
-// 0x0c,0x0e: Reserved for future use within node code.
+// Counters are saturated at 255.
+// 0x0a, 0x0c,0x0e: Reserved for future use within node code.
 // 0x10: Node ID
-// 0x12: V pre-calibration (128 = +0). Node needs to be reset for this to be applied.
-// 0x14: T pre-calibration (128 = +0). ------------------ " " ----------------------
-// 0x16...0x3f: Reserved for future use within node code
+// 0x12: V calibration (128 = +0).
+// 0x14: Ext sens calibration (128 = +0)
+// 0x16: Int Temp calibration (128 = +0).
+// 0x18: (Reserved for calibration)
+// 0x1a...0x3f: Reserved for future use within node code
 // 0x40...0x7f: For free use by master.
 
 #define F_CPU 8000000UL
+#define VERSION_NUMBER 3
 
 #include <inttypes.h>
 #include <avr/io.h>
@@ -41,7 +40,7 @@
 
 #define BROADCAST_ID 255
 
-uint8_t OWN_ID = 254;
+uint8_t own_id = 254;
 
 #define LED_ON()  cbi(PORTB, 1)
 #define LED_OFF() sbi(PORTB, 1)
@@ -54,12 +53,18 @@ uint8_t OWN_ID = 254;
 #define MEAS_RESISTOR_SHUNT_ON()  sbi(DDRB, 4) 
 #define MEAS_RESISTOR_SHUNT_OFF() cbi(DDRB, 4)
 
+typedef union
+{
+	uint16_t both;
+	struct { uint8_t lo; uint8_t hi; };
+} union16_t;
+
 // Return 1 if success, 0 if failure.
 uint8_t get_eeprom_uint8(uint8_t addr, uint8_t* p_val)
 {
 	uint16_t address = addr;
 	uint8_t val = eeprom_read_byte((uint8_t*)address);
-	if(eeprom_read_byte((uint8_t*)(address+1)) != val+1)
+	if(eeprom_read_byte((uint8_t*)(address+1)) != (~val))
 		return 0;
 
 	*p_val = val;
@@ -71,7 +76,7 @@ void put_eeprom_uint8(uint8_t addr, uint8_t val)
 {
 	uint16_t address = addr;
 	eeprom_write_byte((uint8_t*)address, val);
-	eeprom_write_byte((uint8_t*)(address+1), val+1);
+	eeprom_write_byte((uint8_t*)(address+1), (~val));
 }
 
 volatile uint8_t shunting = 0;
@@ -79,18 +84,25 @@ volatile uint8_t receiving = 0;
 
 #define SHUNT_I_START 500000
 
+#define VOLTAGE 0
+#define EXT_SENS 1
+#define INT_TEMP 2
+
 int main()
 {
 	uint32_t shunt_i = 0;
+	uint8_t shunt_devices = 0b11;
+	uint8_t eeprom_change_address = 255;
+	uint8_t debug = 0;
+	uint8_t calibs[4] = {128, 128, 128, 128};
+
+	union16_t prev_long_meas;
+	prev_long_meas.both = 0;
+
 	data_t rcv_data;
 	data_t reply_data;
-//	uint8_t read_store_byte = 0, write_store_byte = 0;
-	uint8_t eeprom_change_address = 255;
 
-//	OCR1C = 244;
-//	TCCR1 = 0b00001111;
-
-	PRR = 0b00001111;
+	PRR = 0b00001111; // Unnecessary peripherals off.
 
 	DDRB  = 0b00001011;
 	PORTB = 0b00001101; // Manchester data input pull-up. Data output high. Volt meas disable.
@@ -120,25 +132,16 @@ int main()
 
 	if(get_eeprom_uint8(log_eepaddr, &tmp) && tmp != 255)
 		put_eeprom_uint8(log_eepaddr, tmp+1);
-	else
+
+	uint8_t i=0;
+	for(uint8_t a = 0x12; a < 0x1a; a+=2)
 	{
-		put_eeprom_uint8(log_eepaddr, 1);
+		get_eeprom_uint8(a, &(calibs[i]));
+		i++;
 	}
 
-	uint8_t debug = 0;
-	if(get_eeprom_uint8(0x0a, &tmp) && tmp == 123)
-		debug = 1;
-
-	uint8_t v_calib = 128;
-	uint8_t t_calib = 128;
-	if(get_eeprom_uint8(0x12, &tmp))
-		v_calib = tmp;
-	if(get_eeprom_uint8(0x14, &tmp))
-		t_calib = tmp;
-
-
-	if(!get_eeprom_uint8(0x10, &OWN_ID) ||
-		OWN_ID < 1 || OWN_ID > 254)
+	if(!get_eeprom_uint8(0x10, &own_id) ||
+		own_id < 1 || own_id > 254)
 	{
 		// Say first-time hello (4 longer blinks)
 		for(uint8_t i = 4; i>0; i--)
@@ -149,8 +152,8 @@ int main()
 			_delay_ms(250);
 		}
 
-		OWN_ID = 254;
-		put_eeprom_uint8(0x10, OWN_ID);
+		own_id = 254;
+		put_eeprom_uint8(0x10, own_id);
 
 	}
 	else // if(!(tmpsr & 0x04))
@@ -180,9 +183,11 @@ int main()
 
 		while(shunting)
 		{
-			LED_ON();
-			MEAS_RESISTOR_SHUNT_ON();
-			while(shunt_i)
+			if(shunt_devices&1)
+				LED_ON();
+			if(shunt_devices&2)
+				MEAS_RESISTOR_SHUNT_ON();
+			while(shunt_i) // one-second loop
 			{
 				if(receiving)
 				{
@@ -203,15 +208,30 @@ int main()
 	  NO_RX_BACK_TO_SLEEP:
 	  	sbi(GIFR,5); // Clear PCINT flag.
 	  	sei();
-		MCUCR = 0b00110000;
+		if(bod_disable)
+		{
+			// AVR team has come up with a hilarious
+			// "timed sequence" which goes like this:
+			MCUCR = 0b10000100;
+			// max 4 clock cycles between these two
+			MCUCR = 0b10110000;
+			// Sleep must be entered in 3 clock cycles
+		}
+		else
+		{
+			MCUCR = 0b00110000;
+		}
 		__asm__ __volatile__("sleep");
 		// NORMALLY, the program stays exactly here, until there is a falling
 		// edge on the input pin.
 		cli(); // 1 clk
 		MCUCR = 0b00000000;  // 1 clk
 
-		if(!receiving) // We woke up for nothing :(.
+		if(!receiving)
+		{	// Interrupt came, but ISR did not set the flag
+			// (pulse was filtered out by ISR)
 			goto NO_RX_BACK_TO_SLEEP; 
+		}
 		// 4 clk
 
       SHUNT_RECEIVE:
@@ -242,107 +262,142 @@ int main()
 
 			// Send "communication error" packet
 
-			reply_data.a = OWN_ID;
-			reply_data.b = 0b00011100;
+			reply_data.a = own_id;
+			reply_data.b = 0x03;
 			reply_data.c = ret;
 			manchester_send(reply_data);
 		}
 		else  // Got the packet OK.
 		{
 
-			if(rcv_data.a == OWN_ID || rcv_data.a == BROADCAST_ID)
+			uint8_t allow_broadcast = 1;
+			if(rcv_data.a == own_id || rcv_data.a == BROADCAST_ID)
 			{
-				if(rcv_data.b == 0b10000100 ||  // Measure & Report V   or
-				   (rcv_data.b & 0b11111100) == 0b10001000)    // Measure & Report T
+				if((rcv_data.b & 0b11100000) == 0b10000000)
 				{
+					reply_data.a = own_id;
+
+					uint8_t src = rcv_data.b & 0b00000011;
 					MEAS_RESISTOR_SHUNT_OFF();
 					cbi(PRR, 0);
- 
-					if(rcv_data.b == 0b10000100) // Voltage
+
+					switch(src)
 					{
-						cbi(PORTB, 3); // enable resistor divider.
-						ADMUX = 0b10000010; // 1V1 reference, ADC2.
-					}
-					else // Temperature
-					{
-						// 00 = internal sensor
-						// 11 = external sensor w/ Vcc reference
-						// 01 = external sensor w/ 1V1 reference
-						// 10 = reserved, currently same as 01
-						if((rcv_data.b&0b11) == 0b00)
-							ADMUX = 0b10001111; // 1V1 reference, ADC4 (internal temp. sensor).
-						else if((rcv_data.b&0b11) == 0b11)
-							ADMUX = 0b00000000; // Vcc reference, ADC0 (reset pin)
-						else
-							ADMUX = 0b10000000; // 1V1 reference, ADC0 (reset pin)
+					case VOLTAGE:
+						ADMUX = 0b10;
+						cbi(PORTB, 3); // Enable resistor divider
+						break;
+					case EXT_SENS:
+						ADMUX = 0;
+						break;
+					case INT_TEMP:
+						ADMUX = 0b1111;
+						break;
+					default:
+						break;
 					}
 
+					if(rcv_data.b & 0b100) // 1V1 reference, else Vcc
+						sbi(ADMUX, 7);
 
-					ADCSRA = 0b10011110;  // enable ADC, enable ADC interrupt, clear int flag, prescaler 64 (125 kHz)
-					_delay_ms(2); // let the filter capacitor charge and ADC stabilize. // 2 ms = 20x R*C time
+					uint16_t num_meas = 1;
+					if(rcv_data.b & 0b00010000)
+					{	// Long measurement - send old result and relay broadcast
+						reply_data.b = prev_long_meas.hi;
+						reply_data.c = prev_long_meas.lo;
+						if(debug) LED_ON();
+						manchester_send(reply_data);
+						LED_OFF();
+
+						if(rcv_data.a == BROADCAST_ID)
+						{
+							allow_broadcast = 0;
+							_delay_ms(2.5);
+							manchester_send(rcv_data);
+						}
+						// First meas = 25 ADC clk = 200 us
+						// Subsequent = 13 ADC clk = 104 us
+						// 2048 = 213 ms
+						num_meas = 2048;
+					}
+
+					// enable ADC, enable ADC interrupt,
+					// clear int flag, prescaler 64 (125 kHz)
+					ADCSRA = 0b10011110;
+					// let the filter capacitor charge and ADC stabilize.
+					// 2 ms = 20x R*C time
+					_delay_ms(2);
 
 					cbi(GIMSK, 5); // Disable pin change interrupt
-					sbi(GIFR,5); // Clear PCINT flag.
-					sei();
-					MCUCR = 0b00101000; // ADC NOISE REDUCTION MODE.
-					__asm__ __volatile__("sleep");
-					cli();
-					MCUCR = 0b00000000;
-					sbi(GIMSK, 5); // Re-enable pin change interrupt
+					sbi(GIFR, 5); // Clear PCINT flag.
 
-					union
+					uint32_t val_accum = 0;
+					while(num_meas--)
 					{
-						uint16_t both;
-						struct { uint8_t lo; uint8_t hi; };
-					} val;
+						sei();
+						MCUCR = 0b00101000; // ADC NOISE REDUCTION MODE.
+						__asm__ __volatile__("sleep");
+						cli();
+						MCUCR = 0b00000000;
 
-					val.both = ADC;
+						union16_t val;
+						val.both = ADC;
+						val_accum += val.both;
+					}
 
 					ADCSRA = 0b00001110;  // disable ADC, disable ADC interrupt, clear int flag, prescaler 64 (125 kHz)
 
 					sbi(PRR, 0);
 					sbi(PORTB, 3); // disable resistor divider.
 
-					val.both -= 128;
+					if(rcv_data.b & 0b00010000)
+						val.both = val_accum >> 9; // /2048 and << 2
+					else
+						val.both <<= 2;  // 10-bit single reading -> 12-bit
 
-					if(rcv_data.b == 0b10000100) // Voltage
-					{
-						val.both += v_calib;
-						reply_data.c = val.lo;
-						reply_data.b = 0b00000100 | (val.hi & 0b00000011);
-					}
-					else  // Temperature
-					{
-						val.both += t_calib;
-						reply_data.c = val.lo;
-						reply_data.b = 0b00001000 | (val.hi & 0b00000011);
+					if(rcv_data.b & 0b00001000)
+					{	// Calibrate
+						val.both -= 128;
+						val.both += calibs[src];
 					}
 
-					reply_data.a = OWN_ID;
+					if(rcv_data.b & 0b00010000)
+					{	// Long
+						prev_long_meas.lo = val.lo;
+						prev_long_meas.hi = 0b01000000 | src<<4 | val.hi & 0x0f;
+					}
+					else
+					{	// Single
+						reply_data.b = 0b01000000 | src<<4 | val.hi & 0x0f;
+						reply_data.c = val.lo;
+						if(debug) LED_ON();
+						manchester_send(reply_data);
+						LED_OFF();
+					}
 
-					if(debug) LED_ON();
-					manchester_send(reply_data);
-					LED_OFF();
+
+
+					sbi(GIMSK, 5); // Re-enable pin change interrupt
 
 					// Compensate for charge usage difference in the chain.
 					// Later nodes use more charge to relay all the messages from
-					// the chain. The measurement command data field indicates
+					// the chain. The measurement message data field indicates
 					// how many nodes are after this node in the chain.
-					// For every node, 480 us of shunting compensates
+					// For every node, 240 us of shunting compensates
 					// for this difference.
-					// This would be 240 shunt loops, but approximate
-					// with 256 to remove the large multiplication.
-					// -- after doubling the current, 120 -> 128.
+					// This would be 120 shunt loops, but approximate
+					// with 128 to remove the multiplication op.
 
 					if(rcv_data.c)
 					{
 						rcv_data.c -= 1;
 						shunting = 1;
+						shunt_devices = 0b11;
 						shunt_i = ((uint32_t)rcv_data.c) << 7;
 					}
 
 				}
-				else if(rcv_data.b == 0b10101100) // Shunt for X time.
+				else if((rcv_data.b & 0b11110000) == 0b10100000) // Shunt for X time.
 				{
 					if(rcv_data.c == 0)
 					{
@@ -351,76 +406,124 @@ int main()
 					else
 					{
 						shunting = rcv_data.c;
+						shunt_devices = rcv_data.b;
 						shunt_i = SHUNT_I_START;
 					}
 				}
-				else if(rcv_data.b == 0b10001100) // Change ID.
+				else if(rcv_data.b == 0b10110000) // Change ID.
 				{
-					OWN_ID = rcv_data.c;
-					put_eeprom_uint8(0x10, OWN_ID);
+					own_id = rcv_data.c;
+					put_eeprom_uint8(0x10, own_id);
 
-					if(rcv_data.a == BROADCAST_ID)
-							rcv_data.c += 1; // Next node gets the next ID.
+					rcv_data.c += 1; // Next node gets the next ID.
 
-					reply_data.a = OWN_ID;
-					reply_data.b = 0b00001100;
-					reply_data.c = 0x10;
-					manchester_send(reply_data); // Send EEPROM MODIFICATION SUCCEEDED reply.
+					reply_data.a = own_id;
+					reply_data.b = 0x00;
+					reply_data.c = 0b10110000;
+					manchester_send(reply_data); // Send Operation Success msg
 				}
-				else if(rcv_data.b == 0b10010000) //  Retrieve 8-bit eeprom value.
-				{
-					reply_data.a = OWN_ID;
-					uint8_t val;
-					if(get_eeprom_uint8(rcv_data.c, &val))
-					{
-						reply_data.b = 0b00010000;
-						reply_data.c = val;
-					}
-					else
-					{
-						reply_data.b = 0b00010100; // eeprom read error
-						reply_data.c = rcv_data.c;
-					}
-
-					manchester_send(reply_data);
-
-				}
-				else if(rcv_data.b == 0b10101000) //  Enable EEPROM change for address
+				else if(rcv_data.b == 0xb1) //  Enable EEPROM change for address
 				{
 					eeprom_change_address = rcv_data.c;
-					reply_data.a = OWN_ID;
-					reply_data.b = 0b00011000;
+					reply_data.a = own_id;
+					reply_data.b = 0x00;
+					reply_data.c = 0xb1;
 					manchester_send(reply_data);
-
 				}
-				else if(rcv_data.b == 0b10011100) // Write 8-bit value
+				else if(rcv_data.b == 0xb2) // Write 8-bit value
 				{
-					reply_data.a = OWN_ID;
-					reply_data.c = eeprom_change_address;
+					reply_data.a = own_id;
+					reply_data.c = 0xb2;
 					if(eeprom_change_address == 255)
 					{
-						reply_data.b = 0b00100100; // access denied
-						manchester_send(reply_data);
+						reply_data.b = 0x01; // OP not allowed
 					}
 					else
 					{
 						put_eeprom_uint8(eeprom_change_address, rcv_data.c);
-						reply_data.b = 0b00001100; // eeprom write success.
-						manchester_send(reply_data);
+						reply_data.b = 0x00; // OP success
 						eeprom_change_address = 255; // remove access.
 					}
+
+					manchester_send(reply_data);
+
+				}
+				else if(rcv_data.b == 0xb3) // Set state
+				{
+					bod_disable = rcv_data.c & 1;
+					debug = rcv_data.c & 2;
+
+					reply_data.a = own_id;
+					reply_data.b = 0x00; // OP OK
+					reply_data.c = 0xb3;
+					manchester_send(reply_data);
+				}
+				else if(rcv_data.b = 0xb4) // Reload variables
+				{
+					uint8_t fail = 0;
+					i = 0;
+					for(uint8_t a = 0x12; a < 0x1a; a+=2)
+					{
+						if(!get_eeprom_uint8(a, &(calibs[i]))) 
+							fail = 1;
+						i++;
+					}
+
+					if(!get_eeprom_uint8(0x10, &own_id) ||
+						own_id < 1 || own_id > 254)
+					{
+						fail = 1;
+					}
+
+					reply_data.a = own_id;
+					reply_data.b = fail;
+					reply_data.c = 0xb4;
+					manchester_send(reply_data);
+				}
+				else if(rcv_data.b = 0xb5) // Node SW version
+				{
+					reply_data.a = own_id;
+					reply_data.b = 0x05;
+					reply_data.c = VERSION_NUMBER;
+					manchester_send(reply_data);
+				}
+				else if((rcv_data.b&0b11110000) == 0b11000000) //  Read eeprom.
+				{
+					reply_data.a = own_id;
+					uint8_t cnt = (rcv_data&0x0f)+1;
+					reply_data.b = 0b00010000;
+					while(cnt--)
+					{
+						if(get_eeprom_uint8(rcv_data.c, &(reply_data.c)))
+						{
+							manchester_send(reply_data);
+							if(cnt)
+							{
+								_delay_ms(2.2);
+								reply_data.b++;
+								rcv_data.c += 2;
+							}
+						}
+						else
+						{
+							reply_data.b = 0x04; // eeprom read error
+							reply_data.c = rcv_data.c;
+							manchester_send(reply_data);
+						}
+					}
+
 				}
 				else
 				{
-					// Send a "unknown command" packet.
+					// Send an "unknown command" packet.
 
-					reply_data.a = OWN_ID;
+					reply_data.a = own_id;
 					reply_data.b = 0b00100000;
 					reply_data.c = rcv_data.b;
 					manchester_send(reply_data);
 				}
 
-				if(rcv_data.a == BROADCAST_ID)
+				if(allow_broadcast && (rcv_data.a == BROADCAST_ID))
 				{
 					_delay_ms(2.2); // (about 1.7 ms would be enough with no clock difference)
 					manchester_send(rcv_data);
@@ -464,7 +567,7 @@ ISR(PCINT0_vect)
 
 	// In reality, 12.5 us (measured).
 	// ISR end overhead 15 clk = 1.875 us.
-	// We were either in the "sleep" instruction or in the shunting loop structure when
+	// We were either in the "sleep" instruction or in the shunting loop when
 	// the interrupt came, so go back where we were.
 } // Grand total from the edge 12 us.
 
@@ -473,4 +576,3 @@ ISR(ADC_vect)
 	// Function stub needed here to get back from ADC Noise Reduction Sleep when
 	// the conversion is done.
 }
-
