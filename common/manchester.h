@@ -4,27 +4,27 @@
 #include <inttypes.h>
 
 #ifndef MANCH_OUTPORT
-#error "Must define MANCH_OUTPORT (defaulting to PORTB)"
+//#error "Must define MANCH_OUTPORT (defaulting to PORTB)"
 #define MANCH_OUTPORT PORTB
 #endif
 
 #ifndef MANCH_INPORT
-#error "Must define MANCH_INPORT (defaulting to PINB)"
+//#error "Must define MANCH_INPORT (defaulting to PINB)"
 #define MANCH_INPORT PINB
 #endif
 
 #ifndef MANCH_INPORT_PULLUP
-#error "Must define MANCH_INPORT_PULLUP (defaulting to PORTB)"
+//#error "Must define MANCH_INPORT_PULLUP (defaulting to PORTB)"
 #define MANCH_INPORT_PULLUP PORTB
 #endif
 
 #ifndef MANCH_OUTPIN
-#error "Must define MANCH_OUTPIN (defaulting to 1)"
+//#error "Must define MANCH_OUTPIN (defaulting to 1)"
 #define MANCH_OUTPIN 1
 #endif
 
 #ifndef MANCH_INPIN
-#error "Must define MANCH_INPIN (defaulting to 3)"
+//#error "Must define MANCH_INPIN (defaulting to 3)"
 #define MANCH_INPIN 3
 #endif
 
@@ -47,10 +47,11 @@ typedef union
 		uint8_t a;
 	};
 	uint32_t abcd;
+	uint8_t block[4];
 } data_t;
 
 
 uint8_t manchester_receive(data_t* data);
-uint8_t manchester_send(data_t data);
+uint8_t manchester_send(data_t* data);
 
 #endif

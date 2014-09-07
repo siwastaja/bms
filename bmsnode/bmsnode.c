@@ -79,7 +79,6 @@ void put_eeprom_uint8(uint8_t addr, uint8_t val)
 	eeprom_write_byte((uint8_t*)(address+1), (~val));
 }
 
-volatile uint8_t shunting = 0;
 volatile uint8_t receiving = 0;
 
 #define SHUNT_I_START 500000
@@ -90,10 +89,13 @@ volatile uint8_t receiving = 0;
 
 int main()
 {
+	uint8_t shunting = 0;
+
 	uint32_t shunt_i = 0;
 	uint8_t shunt_devices = 0b11;
 	uint8_t eeprom_change_address = 255;
-	uint8_t debug = 0;
+//	uint8_t debug = 0;
+	uint8_t bod_disable = 0;
 	uint8_t calibs[4] = {128, 128, 128, 128};
 
 	union16_t prev_long_meas;
@@ -106,7 +108,7 @@ int main()
 
 	DDRB  = 0b00001011;
 	PORTB = 0b00001101; // Manchester data input pull-up. Data output high. Volt meas disable.
-	DIDR0 = 0b00010000; // disable digital input on ADC2.
+	DIDR0 = 0b00110000; // disable digital input on ADC0 & ADC2.
 
 	uint8_t tmp;
 	uint8_t tmpsr = MCUSR;
@@ -133,6 +135,8 @@ int main()
 	if(get_eeprom_uint8(log_eepaddr, &tmp) && tmp != 255)
 		put_eeprom_uint8(log_eepaddr, tmp+1);
 
+
+
 	uint8_t i=0;
 	for(uint8_t a = 0x12; a < 0x1a; a+=2)
 	{
@@ -144,13 +148,13 @@ int main()
 		own_id < 1 || own_id > 254)
 	{
 		// Say first-time hello (4 longer blinks)
-		for(uint8_t i = 4; i>0; i--)
-		{
+//		for(uint8_t i = 4; i>0; i--)
+//		{
 			LED_ON();
 			_delay_ms(250);
 			LED_OFF();
-			_delay_ms(250);
-		}
+//			_delay_ms(250);
+//		}
 
 		own_id = 254;
 		put_eeprom_uint8(0x10, own_id);
@@ -159,13 +163,13 @@ int main()
 	else // if(!(tmpsr & 0x04))
 	{       // If we have a brown-out reset, don't blink.
 		// Say hello (3 short blinks)
-		for(uint8_t i = 3; i>0; i--)
-		{
+//		for(uint8_t i = 3; i>0; i--)
+//		{
 			LED_ON();
 			_delay_ms(100);
 			LED_OFF();
-			_delay_ms(100);
-		}
+//			_delay_ms(100);
+//		}
 	}
 
 
@@ -246,9 +250,11 @@ int main()
 
 		ret = manchester_receive(&rcv_data); 
 
+		reply_data.a = own_id;
+
 		if(ret) // Error, but got at least the start bit ok.
 		{
-			if(debug)
+/*			if(debug)
 			{
 				// Quickly blink leds to indicate error
 				for(uint8_t i = 8; i>0; i--)
@@ -258,14 +264,16 @@ int main()
 					LED_OFF();
 					_delay_ms(50);
 				}
-			}
+				LED_ON();
+				_delay_ms(250);
+				LED_OFF();
+			}*/
 
 			// Send "communication error" packet
 
-			reply_data.a = own_id;
 			reply_data.b = 0x03;
 			reply_data.c = ret;
-			manchester_send(reply_data);
+			manchester_send(&reply_data);
 		}
 		else  // Got the packet OK.
 		{
@@ -275,8 +283,6 @@ int main()
 			{
 				if((rcv_data.b & 0b11100000) == 0b10000000)
 				{
-					reply_data.a = own_id;
-
 					uint8_t src = rcv_data.b & 0b00000011;
 					MEAS_RESISTOR_SHUNT_OFF();
 					cbi(PRR, 0);
@@ -288,6 +294,7 @@ int main()
 						cbi(PORTB, 3); // Enable resistor divider
 						break;
 					case EXT_SENS:
+						sbi(PORTB, 5); // Ext sens pull-up
 						ADMUX = 0;
 						break;
 					case INT_TEMP:
@@ -305,15 +312,15 @@ int main()
 					{	// Long measurement - send old result and relay broadcast
 						reply_data.b = prev_long_meas.hi;
 						reply_data.c = prev_long_meas.lo;
-						if(debug) LED_ON();
-						manchester_send(reply_data);
-						LED_OFF();
+//						if(debug) LED_ON();
+						manchester_send(&reply_data);
+//						LED_OFF();
 
 						if(rcv_data.a == BROADCAST_ID)
 						{
 							allow_broadcast = 0;
-							_delay_ms(2.5);
-							manchester_send(rcv_data);
+							_delay_ms(2.2);
+							manchester_send(&rcv_data);
 						}
 						// First meas = 25 ADC clk = 200 us
 						// Subsequent = 13 ADC clk = 104 us
@@ -326,10 +333,12 @@ int main()
 					ADCSRA = 0b10011110;
 					// let the filter capacitor charge and ADC stabilize.
 					// 2 ms = 20x R*C time
-					_delay_ms(2);
+					_delay_ms(2.2);
 
 					cbi(GIMSK, 5); // Disable pin change interrupt
 					sbi(GIFR, 5); // Clear PCINT flag.
+
+					union16_t val;
 
 					uint32_t val_accum = 0;
 					while(num_meas--)
@@ -364,19 +373,19 @@ int main()
 					if(rcv_data.b & 0b00010000)
 					{	// Long
 						prev_long_meas.lo = val.lo;
-						prev_long_meas.hi = 0b01000000 | src<<4 | val.hi & 0x0f;
+						prev_long_meas.hi = 0b01000000 | (src<<4) | (val.hi & 0x0f);
 					}
 					else
 					{	// Single
-						reply_data.b = 0b01000000 | src<<4 | val.hi & 0x0f;
+						reply_data.b = 0b01000000 | (src<<4) | (val.hi & 0x0f);
 						reply_data.c = val.lo;
-						if(debug) LED_ON();
-						manchester_send(reply_data);
-						LED_OFF();
+//						if(debug) LED_ON();
+						manchester_send(&reply_data);
+//						LED_OFF();
 					}
 
 
-
+					cbi(PORTB, 5); // Ext sens pull-up
 					sbi(GIMSK, 5); // Re-enable pin change interrupt
 
 					// Compensate for charge usage difference in the chain.
@@ -417,22 +426,19 @@ int main()
 
 					rcv_data.c += 1; // Next node gets the next ID.
 
-					reply_data.a = own_id;
 					reply_data.b = 0x00;
 					reply_data.c = 0b10110000;
-					manchester_send(reply_data); // Send Operation Success msg
+					manchester_send(&reply_data); // Send Operation Success msg
 				}
 				else if(rcv_data.b == 0xb1) //  Enable EEPROM change for address
 				{
 					eeprom_change_address = rcv_data.c;
-					reply_data.a = own_id;
 					reply_data.b = 0x00;
 					reply_data.c = 0xb1;
-					manchester_send(reply_data);
+					manchester_send(&reply_data);
 				}
 				else if(rcv_data.b == 0xb2) // Write 8-bit value
 				{
-					reply_data.a = own_id;
 					reply_data.c = 0xb2;
 					if(eeprom_change_address == 255)
 					{
@@ -445,20 +451,19 @@ int main()
 						eeprom_change_address = 255; // remove access.
 					}
 
-					manchester_send(reply_data);
+					manchester_send(&reply_data);
 
 				}
 				else if(rcv_data.b == 0xb3) // Set state
 				{
 					bod_disable = rcv_data.c & 1;
-					debug = rcv_data.c & 2;
+//					debug = rcv_data.c & 2;
 
-					reply_data.a = own_id;
 					reply_data.b = 0x00; // OP OK
 					reply_data.c = 0xb3;
-					manchester_send(reply_data);
+					manchester_send(&reply_data);
 				}
-				else if(rcv_data.b = 0xb4) // Reload variables
+				else if(rcv_data.b == 0xb4) // Reload variables
 				{
 					uint8_t fail = 0;
 					i = 0;
@@ -475,28 +480,25 @@ int main()
 						fail = 1;
 					}
 
-					reply_data.a = own_id;
 					reply_data.b = fail;
 					reply_data.c = 0xb4;
-					manchester_send(reply_data);
+					manchester_send(&reply_data);
 				}
-				else if(rcv_data.b = 0xb5) // Node SW version
+				else if(rcv_data.b == 0xb5) // Node SW version
 				{
-					reply_data.a = own_id;
 					reply_data.b = 0x05;
 					reply_data.c = VERSION_NUMBER;
-					manchester_send(reply_data);
+					manchester_send(&reply_data);
 				}
 				else if((rcv_data.b&0b11110000) == 0b11000000) //  Read eeprom.
 				{
-					reply_data.a = own_id;
-					uint8_t cnt = (rcv_data&0x0f)+1;
+					uint8_t cnt = (rcv_data.b&0x0f)+1;
 					reply_data.b = 0b00010000;
 					while(cnt--)
 					{
 						if(get_eeprom_uint8(rcv_data.c, &(reply_data.c)))
 						{
-							manchester_send(reply_data);
+							manchester_send(&reply_data);
 							if(cnt)
 							{
 								_delay_ms(2.2);
@@ -508,7 +510,7 @@ int main()
 						{
 							reply_data.b = 0x04; // eeprom read error
 							reply_data.c = rcv_data.c;
-							manchester_send(reply_data);
+							manchester_send(&reply_data);
 						}
 					}
 
@@ -517,21 +519,20 @@ int main()
 				{
 					// Send an "unknown command" packet.
 
-					reply_data.a = own_id;
 					reply_data.b = 0b00100000;
 					reply_data.c = rcv_data.b;
-					manchester_send(reply_data);
+					manchester_send(&reply_data);
 				}
 
 				if(allow_broadcast && (rcv_data.a == BROADCAST_ID))
 				{
 					_delay_ms(2.2); // (about 1.7 ms would be enough with no clock difference)
-					manchester_send(rcv_data);
+					manchester_send(&rcv_data);
 				}
 			}
 			else // Not ours, relay as is.
 			{
-				manchester_send(rcv_data);
+				manchester_send(&rcv_data);
 			}
 		}
 

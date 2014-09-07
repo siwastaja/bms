@@ -76,17 +76,17 @@ uint8_t manchester_wait_data_block_timeout(uint32_t cnt)
 #define CRC_INITIAL_REMAINDER 0x00
 #define CRC_POLYNOMIAL 0x07 // As per CRC-8-CCITT
 
-#define CALC_CRC() \
+#define CALC_CRC(remainder) \
 	for(uint8_t bit = 8; bit > 0; --bit)   \
 	{			                           \
-		if(remainder & 0b10000000)         \
+		if((remainder) & 0b10000000)         \
 		{                                  \
-			remainder = (remainder << 1) ^ CRC_POLYNOMIAL; \
+			(remainder) = ((remainder) << 1) ^ CRC_POLYNOMIAL; \
 		}                                  \
 		else                               \
 		{                                  \
 			__asm__ __volatile__ ("nop");  \
-			remainder = (remainder << 1);  \
+			(remainder) = ((remainder) << 1);  \
 			__asm__ __volatile__ ("nop");  \
 		}                                  \
 	}
@@ -168,7 +168,7 @@ uint8_t manchester_receive(data_t* data)  // Function call 4 clk, function overh
 					goto OK2;
 			}
 			PULLUP_ON();
-			return 10+i;
+			return 0x40+i;
 
 			OK2:
 
@@ -187,7 +187,7 @@ uint8_t manchester_receive(data_t* data)  // Function call 4 clk, function overh
 					goto OK3;
 			}
 			PULLUP_ON();
-			return 50+i;
+			return 0x60+i;
 
 			OK3:
 
@@ -197,7 +197,7 @@ uint8_t manchester_receive(data_t* data)  // Function call 4 clk, function overh
 		else
 		{
 			PULLUP_ON();
-			return 100+i;
+			return 0x20+i;
 		}
 
 		// Here, we are aligned perfectly again.
@@ -213,7 +213,7 @@ uint8_t manchester_receive(data_t* data)  // Function call 4 clk, function overh
 		{
 			// We have our latest full byte in data.d
 			remainder ^= (*data).d;        // 3 cycles
-			CALC_CRC();
+			CALC_CRC(remainder);
 			// Total 3+48+24 = 75 cycles = 9.375 us.
 		}
 		else
@@ -234,36 +234,36 @@ uint8_t manchester_receive(data_t* data)  // Function call 4 clk, function overh
 
 
 
-uint8_t manchester_send(data_t data)
+uint8_t manchester_send(data_t* data)
 {
-	uint8_t remainder = CRC_INITIAL_REMAINDER;
+	(*data).d = CRC_INITIAL_REMAINDER;
 
 	ZERO();
 
 	// Calculate CRC here in parts. This should be well timed.
 
-	remainder ^= data.a;                // 3 cycles
-	CALC_CRC();
+	(*data).d ^= (*data).a;                // 3 cycles
+	CALC_CRC((*data).d);
 	// Grand total 48+24+3 = 75 cycles = 9.375 us.
 
-	remainder ^= data.b;                // 3 cycles
-	CALC_CRC();
+	(*data).d ^= (*data).b;                // 3 cycles
+	CALC_CRC((*data).d);
 	// Grand total 48+24+3 = 75 cycles = 9.375 us.
 
 	del_us(25 - 9.375 - 9.375);
 
 	ONE();
 
-	remainder ^= data.c;                // 3 cycles
-	CALC_CRC();
+	(*data).d ^= (*data).c;                // 3 cycles
+	CALC_CRC((*data).d);
 	// Grand total 48+24+3 = 75 cycles = 9.375 us.
 
 	del_us(25 - 9.375);
 
 
-	for(int i = 8; i > 0; --i)
+	for(uint8_t i = 32; i > 0; --i)
 	{
-		if(data.a & 0b10000000)
+		if((*data).a & 0b10000000)
 		{
 			ZERO();
 			del_us(25);
@@ -277,68 +277,8 @@ uint8_t manchester_send(data_t data)
 			ZERO();
 			del_us(25);
 		}
-		data.a = data.a << 1;
+		(*data).abcd = (*data).abcd << 1;
 	}
-
-	for(int i = 8; i > 0; --i)
-	{
-		if(data.b & 0b10000000)
-		{
-			ZERO();
-			del_us(25);
-			ONE();
-			del_us(25);
-		}
-		else
-		{
-			ONE();
-			del_us(25);
-			ZERO();
-			del_us(25);
-		}
-		data.b = data.b << 1;
-	}
-
-
-	for(int i = 8; i > 0; --i)
-	{
-		if(data.c & 0b10000000)
-		{
-			ZERO();
-			del_us(25);
-			ONE();
-			del_us(25);
-		}
-		else
-		{
-			ONE();
-			del_us(25);
-			ZERO();
-			del_us(25);
-		}
-		data.c = data.c << 1;
-	}
-
-
-	for(int i = 8; i > 0; --i)
-	{
-		if(remainder & 0b10000000)
-		{
-			ZERO();
-			del_us(25);
-			ONE();
-			del_us(25);
-		}
-		else
-		{
-			ONE();
-			del_us(25);
-			ZERO();
-			del_us(25);
-		}
-		remainder = remainder << 1;
-	}
-
 
 	ONE();
 
