@@ -63,7 +63,7 @@ Commands (master sends):
 Command(*1)         Description                       Data byte
 
 0x80- 0b100abcde  Measure & Report                    Power consumption leveling(*2) 
- 0x9f         ^^--de: 00 voltage 01 ext sens 10 int temp 11 reserved
+ 0x9f         ^^--de: 00 voltage 01 ext sens 10 int temp 11 ext sens w/ PU resistor
              ^----c: Vref 0 = Vcc (ext sens), 1 = 1.1V (volt, int temp)
             ^-----b: Use offset calibration stored in EEPROM
            ^------a: Long measurement:

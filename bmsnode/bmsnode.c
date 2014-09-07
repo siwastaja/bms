@@ -41,6 +41,7 @@
 #define BROADCAST_ID 255
 
 uint8_t own_id = 254;
+uint8_t calibs[4] = {128, 128, 128, 128};
 
 #define LED_ON()  cbi(PORTB, 1)
 #define LED_OFF() sbi(PORTB, 1)
@@ -79,6 +80,28 @@ void put_eeprom_uint8(uint8_t addr, uint8_t val)
 	eeprom_write_byte((uint8_t*)(address+1), (~val));
 }
 
+uint8_t reload_variables()
+{
+	uint8_t fail = 0;
+	uint8_t i = 0;
+	for(uint8_t a = 0x12; a < 0x1a; a+=2)
+	{
+		if(!get_eeprom_uint8(a, &(calibs[i])))
+		{
+			calibs[i] = 128;
+			fail++;
+		}
+		i++;
+	}
+	if(!get_eeprom_uint8(0x10, &own_id) ||
+		own_id < 1 || own_id > 254)
+	{
+		own_id = 254;
+		fail++;
+	}
+	return fail;
+}
+
 volatile uint8_t receiving = 0;
 
 #define SHUNT_I_START 500000
@@ -86,6 +109,7 @@ volatile uint8_t receiving = 0;
 #define VOLTAGE 0
 #define EXT_SENS 1
 #define INT_TEMP 2
+#define EXT_SENS_PU 3
 
 int main()
 {
@@ -94,9 +118,8 @@ int main()
 	uint32_t shunt_i = 0;
 	uint8_t shunt_devices = 0b11;
 	uint8_t eeprom_change_address = 255;
-//	uint8_t debug = 0;
+	uint8_t debug = 0;
 	uint8_t bod_disable = 0;
-	uint8_t calibs[4] = {128, 128, 128, 128};
 
 	union16_t prev_long_meas;
 	prev_long_meas.both = 0;
@@ -136,40 +159,19 @@ int main()
 		put_eeprom_uint8(log_eepaddr, tmp+1);
 
 
+	reload_variables();
 
-	uint8_t i=0;
-	for(uint8_t a = 0x12; a < 0x1a; a+=2)
+	if(own_id == 254)
 	{
-		get_eeprom_uint8(a, &(calibs[i]));
-		i++;
+		LED_ON();
+		_delay_ms(500);
+		LED_OFF();
 	}
-
-	if(!get_eeprom_uint8(0x10, &own_id) ||
-		own_id < 1 || own_id > 254)
+	else
 	{
-		// Say first-time hello (4 longer blinks)
-//		for(uint8_t i = 4; i>0; i--)
-//		{
-			LED_ON();
-			_delay_ms(250);
-			LED_OFF();
-//			_delay_ms(250);
-//		}
-
-		own_id = 254;
-		put_eeprom_uint8(0x10, own_id);
-
-	}
-	else // if(!(tmpsr & 0x04))
-	{       // If we have a brown-out reset, don't blink.
-		// Say hello (3 short blinks)
-//		for(uint8_t i = 3; i>0; i--)
-//		{
-			LED_ON();
-			_delay_ms(100);
-			LED_OFF();
-//			_delay_ms(100);
-//		}
+		LED_ON();
+		_delay_ms(100);
+		LED_OFF();
 	}
 
 
@@ -254,20 +256,12 @@ int main()
 
 		if(ret) // Error, but got at least the start bit ok.
 		{
-/*			if(debug)
+			if(debug)
 			{
-				// Quickly blink leds to indicate error
-				for(uint8_t i = 8; i>0; i--)
-				{
-					LED_ON();
-					_delay_ms(50);
-					LED_OFF();
-					_delay_ms(50);
-				}
 				LED_ON();
 				_delay_ms(250);
 				LED_OFF();
-			}*/
+			}
 
 			// Send "communication error" packet
 
@@ -290,11 +284,12 @@ int main()
 					switch(src)
 					{
 					case VOLTAGE:
-						ADMUX = 0b10;
+						ADMUX = 0b0010;
 						cbi(PORTB, 3); // Enable resistor divider
 						break;
-					case EXT_SENS:
+					case EXT_SENS_PU:
 						sbi(PORTB, 5); // Ext sens pull-up
+					case EXT_SENS:
 						ADMUX = 0;
 						break;
 					case INT_TEMP:
@@ -312,9 +307,9 @@ int main()
 					{	// Long measurement - send old result and relay broadcast
 						reply_data.b = prev_long_meas.hi;
 						reply_data.c = prev_long_meas.lo;
-//						if(debug) LED_ON();
+						if(debug) LED_ON();
 						manchester_send(&reply_data);
-//						LED_OFF();
+						LED_OFF();
 
 						if(rcv_data.a == BROADCAST_ID)
 						{
@@ -379,13 +374,13 @@ int main()
 					{	// Single
 						reply_data.b = 0b01000000 | (src<<4) | (val.hi & 0x0f);
 						reply_data.c = val.lo;
-//						if(debug) LED_ON();
+						if(debug) LED_ON();
 						manchester_send(&reply_data);
-//						LED_OFF();
+						LED_OFF();
 					}
 
 
-					cbi(PORTB, 5); // Ext sens pull-up
+					cbi(PORTB, 5); // Ext sens pull-up off
 					sbi(GIMSK, 5); // Re-enable pin change interrupt
 
 					// Compensate for charge usage difference in the chain.
@@ -457,7 +452,7 @@ int main()
 				else if(rcv_data.b == 0xb3) // Set state
 				{
 					bod_disable = rcv_data.c & 1;
-//					debug = rcv_data.c & 2;
+					debug = rcv_data.c & 2;
 
 					reply_data.b = 0x00; // OP OK
 					reply_data.c = 0xb3;
@@ -465,22 +460,7 @@ int main()
 				}
 				else if(rcv_data.b == 0xb4) // Reload variables
 				{
-					uint8_t fail = 0;
-					i = 0;
-					for(uint8_t a = 0x12; a < 0x1a; a+=2)
-					{
-						if(!get_eeprom_uint8(a, &(calibs[i]))) 
-							fail = 1;
-						i++;
-					}
-
-					if(!get_eeprom_uint8(0x10, &own_id) ||
-						own_id < 1 || own_id > 254)
-					{
-						fail = 1;
-					}
-
-					reply_data.b = fail;
+					reply_data.b = reload_variables();
 					reply_data.c = 0xb4;
 					manchester_send(&reply_data);
 				}
