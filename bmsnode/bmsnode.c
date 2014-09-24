@@ -424,9 +424,6 @@ int main()
 				else if(rcv_data.b == 0xb1) //  Enable EEPROM change for address
 				{
 					eeprom_change_address = rcv_data.c;
-					reply_data.b = 0x00;
-					reply_data.c = 0xb1;
-					manchester_send(&reply_data);
 				}
 				else if(rcv_data.b == 0xb2) // Write 8-bit value
 				{

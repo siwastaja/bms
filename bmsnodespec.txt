@@ -11,23 +11,25 @@ edge followed by low-to-high edge after 1 communication clock cycle, which is a 
 approx. 40% of the lower cell voltage, e.g., 3.0V and 2.2V is on the brink of failing, which can happen
 during heavy discharge at the end of SoC if the cells differ a lot in their internal resistance and 
 capacity. In this case, the communication results in a framing or CRC error which is reported forward
-by the latter node. These errors, if they repeat, should be treated as Low-Voltage/High-Voltage 
-Cutoff events.
+by the latter node. These errors should be treated as Low-Voltage/High-Voltage Cutoff events.
 
 - Nodes normally send nothing without being asked to by the master. They are as stateless as
-possible, and return to sleep state automatically.
+possible, and always return to sleep state automatically. No communication initiated by master
+guarantees that all nodes go to sleep mode after max. 255 seconds.
 
 - Nodes must be numbered in sequential order, i.e., the first node to receive from master has
 the lowest number (preferably 1). (While this is not technically necessary with the current
 revision, this condition must be kept for future compatibility and just to enforce the
 only sane way to physically find the relevant nodes in case of troubleshooting.)
 
+- Maximum voltage between two adjacent cells is 30V (absolute maximum rating 50V), but it is 
+heavily recommended that the communication goes along with the cell series connections.
+
 - No node-to-node communication: this enables using a single, combined src/dst field, as nodes send
   only to the master and there are no duplicate node ids. There is a master bit
   to identify between master and node originated messages.
 
 - If the received node ID doesn't match with the node's own, the message is relayed as is.
-
 
 - In case of a broadcast message, node first does what it is asked to and sends the reply to master.
 Then, the original message is relayed. This allows broadcast messages to be used to measure all node
@@ -44,7 +46,7 @@ voltages/etc. with minimum effort without interrupting nodes with incoming data 
       = addr                     = cmd                 = val                   = crc
 
 Addresses: 
-0 = master
+0 = reserved for master, although the protocol never uses this anywhere.
 1...253 = nodes. Sequential order required.
 254 = default node ID when nodes are programmed. Nodes default to this ID if the node boots with
       eeprom corrupted at the node address location.
@@ -69,11 +71,10 @@ Command(*1)         Description                       Data byte
            ^------a: Long measurement:
                      - First reports the result of PREVIOUS such operation
                      - Then relays the message, if broadcast address
-                     - Then starts long measurement (approx 800 ms). Incoming data
+                     - Then starts long measurement (approx 200 ms). Incoming data
                        ignored (or measurement slightly messed up?) during this. 
                        Then goes back to sleep. 
                      - During long measurement, subsequent results are averaged.
-                     TODO: Is this good?
 
 0xa0- 0b101000ab  Consume power                       Number of seconds until automatic stop
  0xaf          ^--b: Use LED (+ ~ 20 mA)
@@ -81,8 +82,8 @@ Command(*1)         Description                       Data byte
             ^^----Reserved, write as 0
 
 0xb0  0b10110000  Change node ID                      New ID (*3)
-0xb1  0b10110001  Enable EEPROM write access          EEPROM address for next write operation
-0xb2  0b10110010  Write EEPROM byte                   Data byte
+0xb1  0b10110001  Enable EEPROM write access          EEPROM address for next write operation (does not reply)
+0xb2  0b10110010  Write EEPROM byte                   Data byte (replies OP OK or OP not allowed)
 0xb3  0b10110011  Set state                           Bit 0: BOD disable(*4) (0=don't disable(default), 1=disable)
                                                       Bit 1: Debug mode(*5)  (0=off(default), 1=on)
 
@@ -107,7 +108,7 @@ Command(*1)         Description                       Data byte
     decrements the data byte, so that all nodes end up using approx. the same power for the measurement round.
 *3) The field is incremented by the node when used as a broadcast message, enabling automatic sequencing of the nodes.
 *4) Brown-out detector can be disabled to really minimize current consumption (from ~20 uA to ~1 uA).
-    TODO: Is it re-enabled in reset?
+    Defaults to not disabled state in boot.
 *5) Debug mode blinks LED in data transactions etc. Nice demo.
 
 ----------------
