@@ -10,9 +10,9 @@
 // 0x0a, 0x0c,0x0e: Reserved for future use within node code.
 // 0x10: Node ID
 // 0x12: V calibration (128 = +0).
-// 0x14: Ext sens calibration (128 = +0)
+// 0x14: Ext sens without pull-up calibration (128 = +0)
 // 0x16: Int Temp calibration (128 = +0).
-// 0x18: (Reserved for calibration)
+// 0x18: Ext sens with pull-up calibration.
 // 0x1a...0x3f: Reserved for future use within node code
 // 0x40...0x7f: For free use by master.
 
@@ -161,18 +161,12 @@ int main()
 
 	reload_variables();
 
+	LED_ON();
 	if(own_id == 254)
-	{
-		LED_ON();
 		_delay_ms(500);
-		LED_OFF();
-	}
-	else
-	{
-		LED_ON();
-		_delay_ms(100);
-		LED_OFF();
-	}
+
+	_delay_ms(100);
+	LED_OFF();
 
 
 	GIMSK = 0b00100000; // pin change interrupt enable.
@@ -302,7 +296,7 @@ int main()
 					if(rcv_data.b & 0b100) // 1V1 reference, else Vcc
 						sbi(ADMUX, 7);
 
-					uint16_t num_meas = 1;
+					uint16_t num_meas = 4;
 					if(rcv_data.b & 0b00010000)
 					{	// Long measurement - send old result and relay broadcast
 						reply_data.b = prev_long_meas.hi;
@@ -319,6 +313,7 @@ int main()
 						}
 						// First meas = 25 ADC clk = 200 us
 						// Subsequent = 13 ADC clk = 104 us
+						// 4 = 0.51 ms
 						// 2048 = 213 ms
 						num_meas = 2048;
 					}
@@ -333,8 +328,6 @@ int main()
 					cbi(GIMSK, 5); // Disable pin change interrupt
 					sbi(GIFR, 5); // Clear PCINT flag.
 
-					union16_t val;
-
 					uint32_t val_accum = 0;
 					while(num_meas--)
 					{
@@ -344,9 +337,7 @@ int main()
 						cli();
 						MCUCR = 0b00000000;
 
-						union16_t val;
-						val.both = ADC;
-						val_accum += val.both;
+						val_accum += ADC;
 					}
 
 					ADCSRA = 0b00001110;  // disable ADC, disable ADC interrupt, clear int flag, prescaler 64 (125 kHz)
@@ -354,10 +345,12 @@ int main()
 					sbi(PRR, 0);
 					sbi(PORTB, 3); // disable resistor divider.
 
+					union16_t val;
+
 					if(rcv_data.b & 0b00010000)
 						val.both = val_accum >> 9; // /2048 and << 2
 					else
-						val.both <<= 2;  // 10-bit single reading -> 12-bit
+						val.both = val_accum;  // Quick reading
 
 					if(rcv_data.b & 0b00001000)
 					{	// Calibrate
@@ -366,7 +359,7 @@ int main()
 					}
 
 					if(rcv_data.b & 0b00010000)
-					{	// Long
+					{	// Long measurement
 						prev_long_meas.lo = val.lo;
 						prev_long_meas.hi = 0b01000000 | (src<<4) | (val.hi & 0x0f);
 					}
@@ -391,13 +384,16 @@ int main()
 					// for this difference.
 					// This would be 120 shunt loops, but approximate
 					// with 128 to remove the multiplication op.
+					// debug mode increses the time by 4x (because debug == 0 or 2)
+					// 3x extra = 720 us of 40 mA shunt, which corresponds to
+					// ~1.5 ms of LED only (which is about right).
 
 					if(rcv_data.c)
 					{
 						rcv_data.c -= 1;
 						shunting = 1;
 						shunt_devices = 0b11;
-						shunt_i = ((uint32_t)rcv_data.c) << 7;
+						shunt_i = ((uint32_t)rcv_data.c) << 7 << debug;
 					}
 
 				}
