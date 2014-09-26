@@ -9,12 +9,111 @@
 // Counters are saturated at 255.
 // 0x0a, 0x0c,0x0e: Reserved for future use within node code.
 // 0x10: Node ID
-// 0x12: V calibration (128 = +0).
-// 0x14: Ext sens without pull-up calibration (128 = +0)
-// 0x16: Int Temp calibration (128 = +0).
-// 0x18: Ext sens with pull-up calibration.
-// 0x1a...0x3f: Reserved for future use within node code
+// 0x12: V offset (128 = +0).
+// 0x14: Ext sens offset (128 = +0)
+// 0x16: Int Temp offset (128 = +0).
+// 0x18: V gain adjust (128 = +0)
+// 0x1a: Ext sens gain adjust (128 = +0)
+// 0x1c: Int temp gain adjust (128 = +0)
+// 0x1e: V temp coeff adjust (128 = +0)
+// 0x20: Ext sens temp coeff adjust (128 = +0)
+// 0x22: Int temp temp coeff adjust (128 = +0). Should always be 128.
+// 0x24: Base gain & shift for V
+// 0x26: Base gain & shift for ext T
+// 0x28: Base gain & shift for int T
+// ...0x3f: Reserved for future use within node code
 // 0x40...0x7f: For free use by master.
+
+
+// Two-point calibration.
+/*
+
+    |                    /
+    |                  /
+RAW2|- - - - - - - - x
+    |              / |
+    |            /
+    |          /     |
+RAW1|- - - - x
+    |      / |       |
+    |    /
+    |  /     |       |
+OFS x/
+    |        |       |
+    --------------------------
+    0       V1      V2
+
+V2 = 4.100V (general) or 3.500V (LFP special)
+V1 = 2.900V (general)
+
+################################
+gain = (RAW2 - RAW1) / (V2 - V1)
+gain := 1/gain
+################################
+
+gain = (RAW1 - OFS) / (V1 - 0)
+gain = (RAW2 - OFS) / (V2 - 0)
+
+(RAW1 - OFS1) / (V1) = (RAW2 - RAW1) / (V2 - V1)
+RAW1 - OFS1 = V1(RAW2 - RAW1) / (V2 - V1)
+-OFS1 = V1(RAW2 - RAW1) / (V2 - V1)  - RAW1
+OFS1 = -V1(RAW2 - RAW1) / (V2 - V1) + RAW1
+OFS1 = V1(RAW1 - RAW2) / (V2 - V1) + RAW1
+
+(RAW2 - OFS)2 / V2 = (RAW2 - RAW1) / (V2 - V1)
+RAW2 - OFS2 = V2(RAW2 - RAW1) / (V2 - V1)
+-OFS2 = V2(RAW2 - RAW1) / (V2 - V1) - RAW2
+OFS2 = -V2(RAW2 - RAW1) / (V2 - V1) + RAW2
+OFS2 = V2(RAW1 - RAW2) / (V2 - V1) + RAW2
+
+###################
+OFS = (OFS1+OFS2)/2
+###################
+
+Applying correction
+
+Vcalibrated = (Vraw - OFS)*(gain + lastT*t_coeff)
+
+Basic gain 10-bit to millivolts/2: 9/4 = 2.25
+Basic gain 12-bit to millivolts/2: 9/16 = 0.5625
+
+T internal: 12-bit output = kelvins (9 LSbits used)
+V: 12-bit output = millivolts/2 (2000 means 4.000V)
+
+
+Ex.1
+Calibration points 3V, 4V
+Raw @ 3000mV = 320
+Raw @ 4000mV = 410
+gain = 1/ ((410 - 320) / 1000) = 11.1111
+OFS1 = 3000(-90) / 1000 + 320 = 50
+OFS2 = 4000(-90) / 1000 + 410 = 50
+OFS = 50
+Convert 320: 11.1111*(320 - 50) = 3000
+Convert 410: 11.1111*(410 - 50) = 4000
+Ex.2
+Raw @ 3000mV = 310
+Raw @ 4000mV = 420
+gain = 1/((420-310) / 1000)) = 9.090909
+OFS1 = 3000(-110) / 1000 + 310 = -20
+OFS2 = 4000(-110) / 1000 + 420 = -20
+OFS = -20
+Convert 310: 9.090909*(310 + 20) = 3000
+Convert 420: 9.090909*(420 + 20) = 4000
+
+Implementation:
+
+12-bit data in (0...4095)
+-= offset: Directly an int8_t (-128..+127)
+
+gain (uint16_t): base_gain(uint16_t) + gain_adjust(int8_t) + (temperature-temp_coeff_midpoint)(int8_t)*temp_coeff(int8_t)
+result = gain(uint16_t) * data(uint16_t with 12 bits)
+
+
+
+
+*/
+
 
 #define F_CPU 8000000UL
 #define VERSION_NUMBER 3
@@ -40,8 +139,20 @@
 
 #define BROADCAST_ID 255
 
-uint8_t own_id = 254;
-uint8_t calibs[4] = {128, 128, 128, 128};
+uint8_t own_id;
+
+#define BASEGAIN_BITS 0b00011111
+#define SHIFT_BITS    0b11100000
+
+typedef union
+{
+	struct { int8_t offsets[3]; int8_t gains[3]; int8_t t_coeffs[3]; uint8_t shifts_basegains[3];};
+	uint8_t all[12];
+} calibs_t;
+
+calibs_t calibs;
+
+int8_t last_temp_diff; // difference of latest chip temperature and temp coeff midpoint (+23 degC)
 
 #define LED_ON()  cbi(PORTB, 1)
 #define LED_OFF() sbi(PORTB, 1)
@@ -61,6 +172,7 @@ typedef union
 } union16_t;
 
 // Return 1 if success, 0 if failure.
+// about 7 bytes of stack
 uint8_t get_eeprom_uint8(uint8_t addr, uint8_t* p_val)
 {
 	uint16_t address = addr;
@@ -73,6 +185,7 @@ uint8_t get_eeprom_uint8(uint8_t addr, uint8_t* p_val)
 	return 1;
 }
 
+// about 5 bytes of stack
 void put_eeprom_uint8(uint8_t addr, uint8_t val)
 {
 	uint16_t address = addr;
@@ -80,15 +193,17 @@ void put_eeprom_uint8(uint8_t addr, uint8_t val)
 	eeprom_write_byte((uint8_t*)(address+1), (~val));
 }
 
+// about 10 bytes of stack
 uint8_t reload_variables()
 {
 	uint8_t fail = 0;
 	uint8_t i = 0;
-	for(uint8_t a = 0x12; a < 0x1a; a+=2)
+	for(uint8_t a = 0x12; a < 0x2a; a+=2)
 	{
-		if(!get_eeprom_uint8(a, &(calibs[i])))
+		if(!get_eeprom_uint8(a, &(calibs.all[i])))
 		{
-			calibs[i] = 128;
+			calibs.all[i] = 128;
+			put_eeprom_uint8(a, 128);
 			fail++;
 		}
 		i++;
@@ -97,6 +212,7 @@ uint8_t reload_variables()
 		own_id < 1 || own_id > 254)
 	{
 		own_id = 254;
+		put_eeprom_uint8(0x10, 254);
 		fail++;
 	}
 	return fail;
@@ -111,6 +227,8 @@ volatile uint8_t receiving = 0;
 #define INT_TEMP 2
 #define EXT_SENS_PU 3
 
+// Stack: about 34 bytes + 10 from functions = 44
+// Available sram for .data = about 80 bytes
 int main()
 {
 	uint8_t shunting = 0;
@@ -171,8 +289,6 @@ int main()
 
 	GIMSK = 0b00100000; // pin change interrupt enable.
 	PCMSK = 0b00000100; // PCINT2 enable.
-  	sbi(GIFR,5); // Clear PCINT flag.
-	sei();
 
 	while(1)
 	{
@@ -271,6 +387,27 @@ int main()
 			{
 				if((rcv_data.b & 0b11100000) == 0b10000000)
 				{
+
+					// Compensate for charge usage difference in the chain.
+					// Later nodes use more charge to relay all the messages from
+					// the chain. The measurement message data field indicates
+					// how many nodes are after this node in the chain.
+					// For every node, 240 us of shunting compensates
+					// for this difference.
+					// This would be 120 shunt loops, but approximate
+					// with 128 to remove the multiplication op.
+					// debug mode increses the time by 4x (because debug == 0 or 2)
+					// 3x extra = 720 us of 40 mA shunt, which corresponds to
+					// ~1.5 ms of LED only (which is about right).
+
+					if(rcv_data.c)
+					{
+						shunting = 1;
+						shunt_devices = 0b11;
+						shunt_i = ((uint32_t)rcv_data.c) << 7 << debug;
+						rcv_data.c -= 1;
+					}
+
 					uint8_t src = rcv_data.b & 0b00000011;
 					MEAS_RESISTOR_SHUNT_OFF();
 					cbi(PRR, 0);
@@ -283,6 +420,7 @@ int main()
 						break;
 					case EXT_SENS_PU:
 						sbi(PORTB, 5); // Ext sens pull-up
+						src = EXT_SENS;
 					case EXT_SENS:
 						ADMUX = 0;
 						break;
@@ -303,7 +441,6 @@ int main()
 						reply_data.c = prev_long_meas.lo;
 						if(debug) LED_ON();
 						manchester_send(&reply_data);
-						LED_OFF();
 
 						if(rcv_data.a == BROADCAST_ID)
 						{
@@ -311,6 +448,8 @@ int main()
 							_delay_ms(2.2);
 							manchester_send(&rcv_data);
 						}
+						LED_OFF();
+
 						// First meas = 25 ADC clk = 200 us
 						// Subsequent = 13 ADC clk = 104 us
 						// 4 = 0.51 ms
@@ -348,14 +487,32 @@ int main()
 					union16_t val;
 
 					if(rcv_data.b & 0b00010000)
-						val.both = val_accum >> 9; // /2048 and << 2
-					else
-						val.both = val_accum;  // Quick reading
+						val_accum >>= 9; // /2048 and << 2
 
 					if(rcv_data.b & 0b00001000)
 					{	// Calibrate
-						val.both -= 128;
-						val.both += calibs[src];
+						// V: 0..4095
+						// Offsets adjustment range:
+						// +/- 3.1% (0.024% step)
+						val_accum -= calibs.offsets[src];
+						// Basegain = 1..32 (V: 9 or 18)
+						// << 8 -> 128..8192
+						// Adjustment range: +/-50%(0.39% step) (basegain = 1)
+						//               to: +/-1.6%(0.012% step) (basegain = 32)
+						uint16_t gain = (calibs.shifts_basegains[src]&BASEGAIN_BITS)+1;
+						gain <<= 8;
+						gain += calibs.gains[src]; // gain finetune (-128..+127)
+
+						int16_t temp_corr = (int16_t)calibs.t_coeffs[src] * (int16_t)last_temp_diff;
+						temp_corr >>= 8;
+						gain += temp_corr;
+
+						val_accum *= gain;
+						val_accum >>= 8 + ((calibs.shifts_basegains[src]&SHIFT_BITS)>>5);
+					}
+					else
+					{
+						val.both = val_accum;
 					}
 
 					if(rcv_data.b & 0b00010000)
@@ -372,29 +529,13 @@ int main()
 						LED_OFF();
 					}
 
+					if(src == INT_TEMP)
+					{	// Store chip temperature result for future corrections
+						last_temp_diff = (int16_t)val.both-273-23;
+					}
 
 					cbi(PORTB, 5); // Ext sens pull-up off
 					sbi(GIMSK, 5); // Re-enable pin change interrupt
-
-					// Compensate for charge usage difference in the chain.
-					// Later nodes use more charge to relay all the messages from
-					// the chain. The measurement message data field indicates
-					// how many nodes are after this node in the chain.
-					// For every node, 240 us of shunting compensates
-					// for this difference.
-					// This would be 120 shunt loops, but approximate
-					// with 128 to remove the multiplication op.
-					// debug mode increses the time by 4x (because debug == 0 or 2)
-					// 3x extra = 720 us of 40 mA shunt, which corresponds to
-					// ~1.5 ms of LED only (which is about right).
-
-					if(rcv_data.c)
-					{
-						rcv_data.c -= 1;
-						shunting = 1;
-						shunt_devices = 0b11;
-						shunt_i = ((uint32_t)rcv_data.c) << 7 << debug;
-					}
 
 				}
 				else if((rcv_data.b & 0b11110000) == 0b10100000) // Shunt for X time.
