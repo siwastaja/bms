@@ -168,7 +168,7 @@ int8_t last_temp_diff; // difference of latest chip temperature and temp coeff m
 // when measuring: 1 - an.input - 0
 // when shunting:  1 - 0 - 1
 
-#define MEAS_RESISTOR_SHUNT_ON()  sbi(DDRB, 4) 
+#define MEAS_RESISTOR_SHUNT_ON()  sbi(DDRB, 4)
 #define MEAS_RESISTOR_SHUNT_OFF() cbi(DDRB, 4)
 
 
@@ -176,9 +176,8 @@ int8_t last_temp_diff; // difference of latest chip temperature and temp coeff m
 // about 7 bytes of stack
 uint8_t get_eeprom_uint8(uint8_t addr, uint8_t* p_val)
 {
-	uint16_t address = addr;
-	uint8_t val = eeprom_read_byte((uint8_t*)address);
-	if(eeprom_read_byte((uint8_t*)(address+1)) != (~val))
+	uint8_t val = eeprom_read_byte((uint8_t*)addr);
+	if(eeprom_read_byte((uint8_t*)(addr+1)) != (~val))
 		return 0;
 
 	*p_val = val;
@@ -189,9 +188,8 @@ uint8_t get_eeprom_uint8(uint8_t addr, uint8_t* p_val)
 // about 5 bytes of stack
 void put_eeprom_uint8(uint8_t addr, uint8_t val)
 {
-	uint16_t address = addr;
-	eeprom_write_byte((uint8_t*)address, val);
-	eeprom_write_byte((uint8_t*)(address+1), (~val));
+	eeprom_write_byte((uint8_t*)addr, val);
+	eeprom_write_byte((uint8_t*)(addr+1), (~val));
 }
 
 // about 10 bytes of stack
@@ -205,7 +203,7 @@ uint8_t reload_variables()
 		{
 			calibs.all[i] = 0;
 			put_eeprom_uint8(a, 0);
-			fail++;
+			fail=1;
 		}
 		i++;
 	}
@@ -214,7 +212,7 @@ uint8_t reload_variables()
 	{
 		own_id = 254;
 		put_eeprom_uint8(0x10, 254);
-		fail++;
+		fail=1;
 	}
 	return fail;
 }
