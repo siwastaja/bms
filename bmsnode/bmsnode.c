@@ -1,27 +1,26 @@
 // EEPROM MAP
-// Addr+1 is always a "checksum" of the previous 8-bit val (inverse)
-// All values are 8-bit, starting at even addresses.
-// 0x00: Num of mysterious boots
-// 0x02: Num of power-on resets
-// 0x04: Num of external resets
-// 0x06: Num of brown-out resets
-// 0x08: Num of watchdog resets
-// Counters are saturated at 255.
-// 0x0a, 0x0c,0x0e: Reserved for future use within node code.
-// 0x10: Node ID
-// 0x12: V offset (int8).
-// 0x14: Ext sens offset (int8)
-// 0x16: Int Temp offset (int8).
-// 0x18, 0x1a: V gain (uint16)
-// 0x1c, 0x1e: Ext sens gain (uint16)
-// 0x20, 0x22: Int temp gain (uint16)
-// 0x24: V temp coeff (int8)
-// 0x26: Ext sens temp coeff (int8)
-// 0x28: Int temp temp coeff (int8). Should always be 0.
-// 0x2a: Shift for V (uint8)
-// 0x2c: Shift for ext T (uint8)
-// 0x2e: Shift for int T (uint8)
-// ...0x3f: Reserved for future use within node code
+// 0x00-0x1f: Non-checksummed area
+// 0x00-0x0f: Boot counters, saturated at 255, indexed with MCUSR.
+
+// 0x20 - 0x3e: checksummed area
+// 0x20: Node ID
+// 0x21: V offset (int8).
+// 0x22: Ext sens offset (int8)
+// 0x23: Int Temp offset (int8).
+// 0x24, 0x25: V gain (uint16)
+// 0x26, 0x27: Ext sens gain (uint16)
+// 0x28, 0x29: Int temp gain (uint16)
+// 0x2a: V temp coeff (int8)
+// 0x2b: Ext sens temp coeff (int8)
+// 0x2c: Int temp temp coeff (int8). Should always be 0.
+// 0x2d: Shift for V (uint8)
+// 0x2e: Shift for ext T (uint8)
+// 0x2f: Shift for int T (uint8)
+// 0x30: Checksum of all previous (LSbyte of sum of bytes)
+
+// ...0x3e: Reserved for future use within node code
+
+
 // 0x40...0x7f: For free use by master.
 
 // Typical values for voltage: gain = 9000, shift = 14
@@ -139,8 +138,6 @@ result = gain(uint16_t) * data(uint16_t with 12 bits) >> shift
 
 #define BROADCAST_ID 255
 
-uint8_t own_id;
-
 typedef union
 {
 	int16_t  sboth;
@@ -149,14 +146,15 @@ typedef union
 	struct { uint8_t lo; uint8_t hi; };
 } union16_t;
 
+#define SHADOW_LEN 16
 
 typedef union
 {
-	struct { int8_t offsets[3]; union16_t gains[3]; int8_t t_coeffs[3]; uint8_t shifts[3];};
-	uint8_t all[15];
-} calibs_t;
+	struct { uint8_t own_id; int8_t offsets[3]; union16_t gains[3]; int8_t t_coeffs[3]; uint8_t shifts[3];};
+	uint8_t all[SHADOW_LEN];
+} shadow_t;
 
-calibs_t calibs;
+shadow_t shadow;
 
 int8_t last_temp_diff; // difference of latest chip temperature and temp coeff midpoint (+23 degC)
 
@@ -172,49 +170,30 @@ int8_t last_temp_diff; // difference of latest chip temperature and temp coeff m
 #define MEAS_RESISTOR_SHUNT_OFF() cbi(DDRB, 4)
 
 
-// Return 1 if success, 0 if failure.
-// about 7 bytes of stack
-uint8_t get_eeprom_uint8(uint8_t addr, uint8_t* p_val)
-{
-	uint8_t val = eeprom_read_byte((uint8_t*)addr);
-	if(eeprom_read_byte((uint8_t*)(addr+1)) != (~val))
-		return 0;
-
-	*p_val = val;
-
-	return 1;
-}
-
-// about 5 bytes of stack
-void put_eeprom_uint8(uint8_t addr, uint8_t val)
-{
-	eeprom_write_byte((uint8_t*)addr, val);
-	eeprom_write_byte((uint8_t*)(addr+1), (~val));
-}
-
 // about 10 bytes of stack
 uint8_t reload_variables()
 {
-	uint8_t fail = 0;
-	uint8_t i = 0;
-	for(uint8_t a = 0x12; a < 0x30; a+=2)
+	uint8_t* p_shadow = &(shadow.own_id);
+	uint8_t checksum = 0;
+	for(uint8_t a = 0x20; a < 0x30; a++)
 	{
-		if(!get_eeprom_uint8(a, &(calibs.all[i])))
-		{
-			calibs.all[i] = 0;
-			put_eeprom_uint8(a, 0);
-			fail=1;
-		}
-		i++;
+		*p_shadow = eeprom_read_byte((uint8_t*)(uint16_t)a);
+		checksum += *p_shadow;
+		p_shadow++;
 	}
-	if(!get_eeprom_uint8(0x10, &own_id) ||
-		own_id < 1 || own_id > 254)
+
+	if(checksum != eeprom_read_byte((uint8_t*)0x30))
+		return 1;
+}
+
+void recalc_eeprom_checksum()
+{
+	uint8_t checksum = 0;
+	for(uint8_t a = 0x20; a < 0x30; a++)
 	{
-		own_id = 254;
-		put_eeprom_uint8(0x10, 254);
-		fail=1;
+		checksum += eeprom_read_byte((uint8_t*)(uint16_t)a);
 	}
-	return fail;
+	eeprom_write_byte((uint8_t*)0x30, checksum);
 }
 
 volatile uint8_t receiving = 0;
@@ -254,24 +233,15 @@ int main()
 	uint8_t tmpsr = MCUSR;
 	MCUSR = 0;
 
-	uint8_t log_eepaddr = 0;
-	if(tmpsr & 0x01)  // Power-on reset
-	{
-		log_eepaddr = 2;
-	}
-	else if(tmpsr & 0x04) // Brown-out reset
-	{
-		log_eepaddr = 6;
-	}
-
-	if(get_eeprom_uint8(log_eepaddr, &tmp) && tmp != 255)
-		put_eeprom_uint8(log_eepaddr, tmp+1);
+	tmp = eeprom_read_byte((uint8_t*)(uint16_t)tmpsr);
+	if(tmp != 255)
+		eeprom_write_byte((uint8_t*)(uint16_t)tmpsr, tmp+1);
 
 
 	reload_variables();
 
 	LED_ON();
-	if(own_id == 254)
+	if(shadow.own_id == 254)
 		_delay_ms(500);
 
 	_delay_ms(100);
@@ -353,7 +323,7 @@ int main()
 
 		ret = manchester_receive(&rcv_data); 
 
-		reply_data.a = own_id;
+		reply_data.a = shadow.own_id;
 
 		if(ret) // Error, but got at least the start bit ok.
 		{
@@ -374,7 +344,7 @@ int main()
 		{
 
 			uint8_t allow_broadcast = 1;
-			if(rcv_data.a == own_id || rcv_data.a == BROADCAST_ID)
+			if(rcv_data.a == shadow.own_id || rcv_data.a == BROADCAST_ID)
 			{
 				if((rcv_data.b & 0b11100000) == 0b10000000)
 				{
@@ -485,16 +455,16 @@ int main()
 						// V: 0..4095
 						// Offsets adjustment range:
 						// +/- 3.1% (0.024% step)
-						val_accum -= calibs.offsets[src];
+						val_accum -= shadow.offsets[src];
 
-						uint16_t gain = calibs.gains[src].both;
+						uint16_t gain = shadow.gains[src].both;
 
-						int16_t temp_corr = (int16_t)calibs.t_coeffs[src] * (int16_t)last_temp_diff;
+						int16_t temp_corr = (int16_t)shadow.t_coeffs[src] * (int16_t)last_temp_diff;
 						temp_corr >>= 8;
 						gain += temp_corr;
 
 						val_accum *= gain;
-						val_accum >>= calibs.shifts[src];
+						val_accum >>= shadow.shifts[src];
 					}
 
 					union16_t val;
@@ -539,8 +509,9 @@ int main()
 				}
 				else if(rcv_data.b == 0b10110000) // Change ID.
 				{
-					own_id = rcv_data.c;
-					put_eeprom_uint8(0x10, own_id);
+					shadow.own_id = rcv_data.c;
+					eeprom_write_byte((uint8_t*)0x20, shadow.own_id);
+					recalc_eeprom_checksum();
 
 					rcv_data.c += 1; // Next node gets the next ID.
 
@@ -561,7 +532,8 @@ int main()
 					}
 					else
 					{
-						put_eeprom_uint8(eeprom_change_address, rcv_data.c);
+						eeprom_write_byte((uint8_t*)(uint16_t)eeprom_change_address, rcv_data.c);
+						recalc_eeprom_checksum();
 						reply_data.b = 0x00; // OP success
 						eeprom_change_address = 255; // remove access.
 					}
@@ -584,36 +556,11 @@ int main()
 					reply_data.c = 0xb4;
 					manchester_send(&reply_data);
 				}
-				else if(rcv_data.b == 0xb5) // Node SW version
+				else if(rcv_data.b == 0xb5) //  Read eeprom.
 				{
 					reply_data.b = 0x05;
-					reply_data.c = VERSION_NUMBER;
+					reply_data.c = eeprom_read_byte((uint8_t*)(uint16_t)rcv_data.c);
 					manchester_send(&reply_data);
-				}
-				else if((rcv_data.b&0b11110000) == 0b11000000) //  Read eeprom.
-				{
-					uint8_t cnt = (rcv_data.b&0x0f)+1;
-					reply_data.b = 0b00010000;
-					while(cnt--)
-					{
-						if(get_eeprom_uint8(rcv_data.c, &(reply_data.c)))
-						{
-							manchester_send(&reply_data);
-							if(cnt)
-							{
-								_delay_ms(2.2);
-								reply_data.b++;
-								rcv_data.c += 2;
-							}
-						}
-						else
-						{
-							reply_data.b = 0x04; // eeprom read error
-							reply_data.c = rcv_data.c;
-							manchester_send(&reply_data);
-						}
-					}
-
 				}
 				else
 				{
