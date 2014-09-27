@@ -93,12 +93,10 @@ Command(*1)         Description                       Data byte
                     Use this if you changed node ID using Write Eeprom insted of Change Node ID
                     or if you have changed calibration values and don't want to cycle power.
 
-0xb5  0b10110101  Report node SW version
-               
-0xc0- 0b1100abcd  Read EEPROM                         EEPROM start address
-0xcf        ^^^^--abcd+1=num bytes (1-16) 
+0xb5  0b10110101  Read EEPROM                         EEPROM address
+0xb6  0b10110110  Run self-check
 
-0xd0-0xff Reserved for future use
+rest Reserved for future use
 
 
 *1) First byte includes the master bit
@@ -129,12 +127,9 @@ Identifier(*1)         Description                       Data byte
 0x02  0b00000010       Unknown Command                   Original command byte
 0x03  0b00000011       Communication error               Error code(*2)
 0x04  0b00000100       EEPROM read checksum error        Eeprom address
-0x05  0b00000101       Node SW version                   Version number (1-255)
-0x06- 0b000001xx       Reserved
- 0x07
-
-0x10- 0b0001abcd       EEPROM data                       Data value
- 0x1f       ^^^^-------abcd: Number of byte in read sequence.
+0x05  0b00000101       EEPROM data                       Data value
+0x06  0b00000110       Self-check status                 Result
+0x07  0b00000111       Reserved
 
 0x70- 0b01abcdef       Measurement data                  8 lowest bits of value
  0x7f       ^^^^-------cdef: 4 MSbits of value.

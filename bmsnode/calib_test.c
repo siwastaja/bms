@@ -7,17 +7,18 @@
 #include <inttypes.h>
 #include <stdio.h>
 
+
 int main()
 {
 	int8_t offset = 0;
-	uint16_t gain = 9000;
+	uint16_t gain = 2048;
 	int8_t t_coeff = 0;
-	uint8_t shift = 6;
+	uint8_t shift = 13;
 
 	uint16_t t = 283;
 	int8_t last_temp_diff = (int16_t)t-273-23;
 
-	uint32_t val_accum = 800;
+	uint32_t val_accum = 273; // 800;
 
 	printf("raw 10-bit: %u\n", val_accum);
 	val_accum *= 2048;
@@ -45,7 +46,7 @@ int main()
 
 	printf("corrected value: %u\n", val_accum);
 
-	val_accum >>= 8 + shift;
+	val_accum >>= shift;
 
 	printf("corrected value: %u\n", val_accum);
 

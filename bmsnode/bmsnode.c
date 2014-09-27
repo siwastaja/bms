@@ -1,6 +1,7 @@
 // EEPROM MAP
 // 0x00-0x1f: Non-checksummed area
 // 0x00-0x0f: Boot counters, saturated at 255, indexed with MCUSR.
+// 0x10: Node SW version number
 
 // 0x20 - 0x3e: checksummed area
 // 0x20: Node ID
@@ -22,8 +23,6 @@
 
 
 // 0x40...0x7f: For free use by master.
-
-// Typical values for voltage: gain = 9000, shift = 14
 
 // Two-point calibration.
 /*
@@ -109,6 +108,8 @@ Implementation:
 gain (uint16_t): gain(uint16_t) + (temperature-temp_coeff_midpoint)(int8_t)*temp_coeff(int8_t)
 result = gain(uint16_t) * data(uint16_t with 12 bits) >> shift
 
+Typical values for voltage: gain = 9000, shift = 14
+
 
 
 
@@ -116,7 +117,6 @@ result = gain(uint16_t) * data(uint16_t with 12 bits) >> shift
 
 
 #define F_CPU 8000000UL
-#define VERSION_NUMBER 3
 
 #include <inttypes.h>
 #include <avr/io.h>
@@ -146,6 +146,12 @@ typedef union
 	struct { uint8_t lo; uint8_t hi; };
 } union16_t;
 
+typedef union
+{
+	uint32_t both;
+	struct { uint16_t lo; uint16_t hi; };
+} union32_t;
+
 #define SHADOW_LEN 16
 
 typedef union
@@ -170,7 +176,6 @@ int8_t last_temp_diff; // difference of latest chip temperature and temp coeff m
 #define MEAS_RESISTOR_SHUNT_OFF() cbi(DDRB, 4)
 
 
-// about 10 bytes of stack
 uint8_t reload_variables()
 {
 	uint8_t* p_shadow = &(shadow.own_id);
@@ -184,16 +189,22 @@ uint8_t reload_variables()
 
 	if(checksum != eeprom_read_byte((uint8_t*)0x30))
 		return 1;
+
+	return 0;
 }
 
-void recalc_eeprom_checksum()
+uint8_t recalc_eeprom_checksum(uint8_t save)
 {
 	uint8_t checksum = 0;
 	for(uint8_t a = 0x20; a < 0x30; a++)
 	{
 		checksum += eeprom_read_byte((uint8_t*)(uint16_t)a);
 	}
-	eeprom_write_byte((uint8_t*)0x30, checksum);
+	if(save)
+		eeprom_write_byte((uint8_t*)0x30, checksum);
+	else if(checksum != eeprom_read_byte((uint8_t*)0x30))
+		return 1;
+	return 0;
 }
 
 volatile uint8_t receiving = 0;
@@ -428,6 +439,7 @@ int main()
 					cbi(GIMSK, 5); // Disable pin change interrupt
 					sbi(GIFR, 5); // Clear PCINT flag.
 
+//					union union32_t { uint32_t u32; struct{uint16_t u16hi; uint16_t u16lo;};};
 					uint32_t val_accum = 0;
 
 					while(num_meas--)
@@ -453,7 +465,7 @@ int main()
 					if(rcv_data.b & 0b00001000)
 					{	// Calibrate
 						// V: 0..4095
-						// Offsets adjustment range:
+						// Offset adjustment range:
 						// +/- 3.1% (0.024% step)
 						val_accum -= shadow.offsets[src];
 
@@ -511,7 +523,7 @@ int main()
 				{
 					shadow.own_id = rcv_data.c;
 					eeprom_write_byte((uint8_t*)0x20, shadow.own_id);
-					recalc_eeprom_checksum();
+					recalc_eeprom_checksum(1);
 
 					rcv_data.c += 1; // Next node gets the next ID.
 
@@ -533,7 +545,7 @@ int main()
 					else
 					{
 						eeprom_write_byte((uint8_t*)(uint16_t)eeprom_change_address, rcv_data.c);
-						recalc_eeprom_checksum();
+						recalc_eeprom_checksum(1);
 						reply_data.b = 0x00; // OP success
 						eeprom_change_address = 255; // remove access.
 					}
@@ -560,6 +572,15 @@ int main()
 				{
 					reply_data.b = 0x05;
 					reply_data.c = eeprom_read_byte((uint8_t*)(uint16_t)rcv_data.c);
+					manchester_send(&reply_data);
+				}
+				else if(rcv_data.b == 0xb6) // Do self-test
+				{
+					reply_data.b = 0x06;
+					reply_data.c = 0;
+					if(recalc_eeprom_checksum(0))
+						reply_data.c |= 0b00000001;
+
 					manchester_send(&reply_data);
 				}
 				else

@@ -85,9 +85,9 @@ uint8_t manchester_wait_data_block_timeout(uint32_t cnt)
 		}                                  \
 		else                               \
 		{                                  \
-			__asm__ __volatile__ ("nop");  \
-			(remainder) = ((remainder) << 1);  \
-			__asm__ __volatile__ ("nop");  \
+			__asm__ __volatile__ ("nop"); \
+			(remainder) = ((remainder) << 1);\
+			 __asm__ __volatile__ ("nop"); \
 		}                                  \
 	}
 
@@ -140,7 +140,7 @@ uint8_t manchester_receive(data_t* data)  // Function call 4 clk, function overh
 		// The expected edge is at 50 us, but allow it some window
 		// due to clock differences.
 
-		del_us(35.0 - 2.5 - 10.125 - 2.5); // CRC calculation uses 10.125 us - see
+		del_us(35.0 - 2.5 - 10.125 - 2.5 + 1.0); // CRC calculation uses 10.125 us - see
 		                             // below.
 									 // -2.5 = measured correction.
 
@@ -171,8 +171,7 @@ uint8_t manchester_receive(data_t* data)  // Function call 4 clk, function overh
 			return 0x40+i;
 
 			OK2:
-
-			del_us(1.125);
+			__asm__ __volatile__ ("nop");
 
 		}
 		else if(n_low_readings > 4) // low -- expect high
@@ -191,7 +190,7 @@ uint8_t manchester_receive(data_t* data)  // Function call 4 clk, function overh
 
 			OK3:
 
-			(*data).abcd |= 1; // 9 clk = 1.125 us
+			(*data).d |= 1; // 1 clk = 0.125 us
 
 		}
 		else
