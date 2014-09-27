@@ -176,21 +176,16 @@ int8_t last_temp_diff; // difference of latest chip temperature and temp coeff m
 #define MEAS_RESISTOR_SHUNT_OFF() cbi(DDRB, 4)
 
 
-uint8_t reload_variables()
+void reload_variables()
 {
+//	eeprom_read_block((void*)(&(shadow.own_id)), (void*)0x20, SHADOW_LEN);
+	// Own implementation is 24 bytes smaller than eeprom_read_block
 	uint8_t* p_shadow = &(shadow.own_id);
-	uint8_t checksum = 0;
 	for(uint8_t a = 0x20; a < 0x30; a++)
 	{
 		*p_shadow = eeprom_read_byte((uint8_t*)(uint16_t)a);
-		checksum += *p_shadow;
 		p_shadow++;
 	}
-
-	if(checksum != eeprom_read_byte((uint8_t*)0x30))
-		return 1;
-
-	return 0;
 }
 
 uint8_t recalc_eeprom_checksum(uint8_t save)
@@ -217,7 +212,7 @@ volatile uint8_t receiving = 0;
 #define EXT_SENS_PU 3
 
 // Stack: about 34 bytes + 10 from functions = 44
-// Available sram for .data = about 80 bytes
+// Available sram for globals = about 80 bytes
 int main()
 {
 	uint8_t shunting = 0;
@@ -241,7 +236,7 @@ int main()
 	DIDR0 = 0b00110000; // disable digital input on ADC0 & ADC2.
 
 	uint8_t tmp;
-	uint8_t tmpsr = MCUSR;
+	uint8_t tmpsr = MCUSR; // MCUSR is guaranteed < 16
 	MCUSR = 0;
 
 	tmp = eeprom_read_byte((uint8_t*)(uint16_t)tmpsr);
@@ -249,15 +244,11 @@ int main()
 		eeprom_write_byte((uint8_t*)(uint16_t)tmpsr, tmp+1);
 
 
-	reload_variables();
-
 	LED_ON();
-	if(shadow.own_id == 254)
-		_delay_ms(500);
-
 	_delay_ms(100);
 	LED_OFF();
 
+	reload_variables();
 
 	GIMSK = 0b00100000; // pin change interrupt enable.
 	PCMSK = 0b00000100; // PCINT2 enable.
@@ -324,7 +315,6 @@ int main()
 
       SHUNT_RECEIVE:
 		MEAS_RESISTOR_SHUNT_OFF();
-		LED_OFF();
 
 		receiving = 0; // 2 clk
 
@@ -332,8 +322,10 @@ int main()
 		// (Added MEAS_RESISTOR_SHUNT_OFF() and LED_OFF() since then,
                 // but shouldn't make big difference.
 
+		if(debug)
+			LED_ON();
 		ret = manchester_receive(&rcv_data); 
-
+		LED_OFF();
 		reply_data.a = shadow.own_id;
 
 		if(ret) // Error, but got at least the start bit ok.
@@ -411,7 +403,6 @@ int main()
 					{	// Long measurement - send old result and relay broadcast
 						reply_data.b = prev_long_meas.hi;
 						reply_data.c = prev_long_meas.lo;
-						if(debug) LED_ON();
 						manchester_send(&reply_data);
 
 						if(rcv_data.a == BROADCAST_ID)
@@ -420,7 +411,6 @@ int main()
 							_delay_ms(2.2);
 							manchester_send(&rcv_data);
 						}
-						LED_OFF();
 
 						// First meas = 25 ADC clk = 200 us
 						// Subsequent = 13 ADC clk = 104 us
@@ -439,8 +429,8 @@ int main()
 					cbi(GIMSK, 5); // Disable pin change interrupt
 					sbi(GIFR, 5); // Clear PCINT flag.
 
-//					union union32_t { uint32_t u32; struct{uint16_t u16hi; uint16_t u16lo;};};
-					uint32_t val_accum = 0;
+					union32_t val_accum;
+					val_accum.both = 0;
 
 					while(num_meas--)
 					{
@@ -450,7 +440,7 @@ int main()
 						cli();
 						MCUCR = 0b00000000;
 
-						val_accum += ADC;
+						val_accum.both += ADC;
 					}
 
 					ADCSRA = 0b00001110;  // disable ADC, disable ADC interrupt, clear int flag, prescaler 64 (125 kHz)
@@ -460,14 +450,14 @@ int main()
 
 
 					if(rcv_data.b & 0b00010000)
-						val_accum >>= 9; // /2048 and << 2
+						val_accum.both >>= 9; // /2048 and << 2
 
 					if(rcv_data.b & 0b00001000)
 					{	// Calibrate
 						// V: 0..4095
 						// Offset adjustment range:
 						// +/- 3.1% (0.024% step)
-						val_accum -= shadow.offsets[src];
+						val_accum.lo -= shadow.offsets[src]; // guaranteed to be 16-bit here
 
 						uint16_t gain = shadow.gains[src].both;
 
@@ -475,13 +465,13 @@ int main()
 						temp_corr >>= 8;
 						gain += temp_corr;
 
-						val_accum *= gain;
-						val_accum >>= shadow.shifts[src];
+						val_accum.both *= gain;
+						val_accum.both >>= shadow.shifts[src];
 					}
 
 					union16_t val;
 
-					val.both = val_accum;
+					val.both = val_accum.lo;
 
 					if(rcv_data.b & 0b00010000)
 					{	// Long measurement
@@ -492,9 +482,7 @@ int main()
 					{	// Single
 						reply_data.b = 0b01000000 | (src<<4) | (val.hi & 0x0f);
 						reply_data.c = val.lo;
-						if(debug) LED_ON();
 						manchester_send(&reply_data);
-						LED_OFF();
 					}
 
 					if(src == INT_TEMP)
@@ -564,7 +552,8 @@ int main()
 				}
 				else if(rcv_data.b == 0xb4) // Reload variables
 				{
-					reply_data.b = reload_variables()?0x04:0x00;
+					reload_variables();
+					reply_data.b = 0x00;
 					reply_data.c = 0xb4;
 					manchester_send(&reply_data);
 				}
