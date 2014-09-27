@@ -9,21 +9,22 @@
 // Counters are saturated at 255.
 // 0x0a, 0x0c,0x0e: Reserved for future use within node code.
 // 0x10: Node ID
-// 0x12: V offset (128 = +0).
-// 0x14: Ext sens offset (128 = +0)
-// 0x16: Int Temp offset (128 = +0).
-// 0x18: V gain adjust (128 = +0)
-// 0x1a: Ext sens gain adjust (128 = +0)
-// 0x1c: Int temp gain adjust (128 = +0)
-// 0x1e: V temp coeff adjust (128 = +0)
-// 0x20: Ext sens temp coeff adjust (128 = +0)
-// 0x22: Int temp temp coeff adjust (128 = +0). Should always be 128.
-// 0x24: Base gain & shift for V
-// 0x26: Base gain & shift for ext T
-// 0x28: Base gain & shift for int T
+// 0x12: V offset (int8).
+// 0x14: Ext sens offset (int8)
+// 0x16: Int Temp offset (int8).
+// 0x18, 0x1a: V gain (uint16)
+// 0x1c, 0x1e: Ext sens gain (uint16)
+// 0x20, 0x22: Int temp gain (uint16)
+// 0x24: V temp coeff (int8)
+// 0x26: Ext sens temp coeff (int8)
+// 0x28: Int temp temp coeff (int8). Should always be 0.
+// 0x2a: Shift for V (uint8)
+// 0x2c: Shift for ext T (uint8)
+// 0x2e: Shift for int T (uint8)
 // ...0x3f: Reserved for future use within node code
 // 0x40...0x7f: For free use by master.
 
+// Typical values for voltage: gain = 9000, shift = 14
 
 // Two-point calibration.
 /*
@@ -106,8 +107,8 @@ Implementation:
 12-bit data in (0...4095)
 -= offset: Directly an int8_t (-128..+127)
 
-gain (uint16_t): base_gain(uint16_t) + gain_adjust(int8_t) + (temperature-temp_coeff_midpoint)(int8_t)*temp_coeff(int8_t)
-result = gain(uint16_t) * data(uint16_t with 12 bits)
+gain (uint16_t): gain(uint16_t) + (temperature-temp_coeff_midpoint)(int8_t)*temp_coeff(int8_t)
+result = gain(uint16_t) * data(uint16_t with 12 bits) >> shift
 
 
 
@@ -126,7 +127,6 @@ result = gain(uint16_t) * data(uint16_t with 12 bits)
 #include <util/delay.h>
 #include <stdio.h>
 
-
 #include "../common/manchester.h"
 
 
@@ -141,13 +141,19 @@ result = gain(uint16_t) * data(uint16_t with 12 bits)
 
 uint8_t own_id;
 
-#define BASEGAIN_BITS 0b00011111
-#define SHIFT_BITS    0b11100000
+typedef union
+{
+	int16_t  sboth;
+	uint16_t both;
+	struct { int8_t slo; int8_t shi; };
+	struct { uint8_t lo; uint8_t hi; };
+} union16_t;
+
 
 typedef union
 {
-	struct { int8_t offsets[3]; int8_t gains[3]; int8_t t_coeffs[3]; uint8_t shifts_basegains[3];};
-	uint8_t all[12];
+	struct { int8_t offsets[3]; union16_t gains[3]; int8_t t_coeffs[3]; uint8_t shifts[3];};
+	uint8_t all[15];
 } calibs_t;
 
 calibs_t calibs;
@@ -165,11 +171,6 @@ int8_t last_temp_diff; // difference of latest chip temperature and temp coeff m
 #define MEAS_RESISTOR_SHUNT_ON()  sbi(DDRB, 4) 
 #define MEAS_RESISTOR_SHUNT_OFF() cbi(DDRB, 4)
 
-typedef union
-{
-	uint16_t both;
-	struct { uint8_t lo; uint8_t hi; };
-} union16_t;
 
 // Return 1 if success, 0 if failure.
 // about 7 bytes of stack
@@ -198,12 +199,12 @@ uint8_t reload_variables()
 {
 	uint8_t fail = 0;
 	uint8_t i = 0;
-	for(uint8_t a = 0x12; a < 0x2a; a+=2)
+	for(uint8_t a = 0x12; a < 0x30; a+=2)
 	{
 		if(!get_eeprom_uint8(a, &(calibs.all[i])))
 		{
-			calibs.all[i] = 128;
-			put_eeprom_uint8(a, 128);
+			calibs.all[i] = 0;
+			put_eeprom_uint8(a, 0);
 			fail++;
 		}
 		i++;
@@ -260,17 +261,9 @@ int main()
 	{
 		log_eepaddr = 2;
 	}
-	else if(tmpsr & 0x02) // External reset
-	{
-		log_eepaddr = 4;
-	}
 	else if(tmpsr & 0x04) // Brown-out reset
 	{
 		log_eepaddr = 6;
-	}
-	else if(tmpsr & 0x08) // Watchdog reset
-	{
-		log_eepaddr = 8;
 	}
 
 	if(get_eeprom_uint8(log_eepaddr, &tmp) && tmp != 255)
@@ -468,6 +461,7 @@ int main()
 					sbi(GIFR, 5); // Clear PCINT flag.
 
 					uint32_t val_accum = 0;
+
 					while(num_meas--)
 					{
 						sei();
@@ -484,7 +478,6 @@ int main()
 					sbi(PRR, 0);
 					sbi(PORTB, 3); // disable resistor divider.
 
-					union16_t val;
 
 					if(rcv_data.b & 0b00010000)
 						val_accum >>= 9; // /2048 and << 2
@@ -495,25 +488,20 @@ int main()
 						// Offsets adjustment range:
 						// +/- 3.1% (0.024% step)
 						val_accum -= calibs.offsets[src];
-						// Basegain = 1..32 (V: 9 or 18)
-						// << 8 -> 128..8192
-						// Adjustment range: +/-50%(0.39% step) (basegain = 1)
-						//               to: +/-1.6%(0.012% step) (basegain = 32)
-						uint16_t gain = (calibs.shifts_basegains[src]&BASEGAIN_BITS)+1;
-						gain <<= 8;
-						gain += calibs.gains[src]; // gain finetune (-128..+127)
+
+						uint16_t gain = calibs.gains[src].both;
 
 						int16_t temp_corr = (int16_t)calibs.t_coeffs[src] * (int16_t)last_temp_diff;
 						temp_corr >>= 8;
 						gain += temp_corr;
 
 						val_accum *= gain;
-						val_accum >>= 8 + ((calibs.shifts_basegains[src]&SHIFT_BITS)>>5);
+						val_accum >>= calibs.shifts[src];
 					}
-					else
-					{
-						val.both = val_accum;
-					}
+
+					union16_t val;
+
+					val.both = val_accum;
 
 					if(rcv_data.b & 0b00010000)
 					{	// Long measurement
@@ -594,7 +582,7 @@ int main()
 				}
 				else if(rcv_data.b == 0xb4) // Reload variables
 				{
-					reply_data.b = reload_variables();
+					reply_data.b = reload_variables()?0x04:0x00;
 					reply_data.c = 0xb4;
 					manchester_send(&reply_data);
 				}

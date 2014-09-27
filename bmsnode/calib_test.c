@@ -10,14 +10,14 @@
 int main()
 {
 	int8_t offset = 0;
-	int8_t gain_adj = 0;
+	uint16_t gain = 9000;
 	int8_t t_coeff = 0;
-	uint8_t shifts_basegain = (7 << 5) | (32-1);
+	uint8_t shift = 6;
 
 	uint16_t t = 283;
 	int8_t last_temp_diff = (int16_t)t-273-23;
 
-	uint32_t val_accum = 1023;
+	uint32_t val_accum = 800;
 
 	printf("raw 10-bit: %u\n", val_accum);
 	val_accum *= 2048;
@@ -29,12 +29,7 @@ int main()
 	val_accum -= offset;
 	printf("offset-corrected: %u\n", val_accum);
 
-	uint16_t gain = (shifts_basegain&0x1f)+1;
 	printf("gain: %u\n", gain);
-	gain <<= 8;
-	printf("gain: %u\n", gain);
-	gain += gain_adj;
-	printf("gain (adjusted): %u\n", gain);
 
 	printf("last_temp_diff: %d\n", last_temp_diff);
 
@@ -44,13 +39,13 @@ int main()
 	printf("temp_corr: %d\n", temp_corr);
 
 	gain += temp_corr;
-	printf("gain (adjusted, temp corrected): %u\n", gain);
+	printf("gain (temp corrected): %u\n", gain);
 
 	val_accum *= gain;
 
 	printf("corrected value: %u\n", val_accum);
 
-	val_accum >>= 8 + ((shifts_basegain&0b11100000)>>5);
+	val_accum >>= 8 + shift;
 
 	printf("corrected value: %u\n", val_accum);
 
