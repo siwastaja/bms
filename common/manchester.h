@@ -50,8 +50,9 @@ typedef union
 	uint8_t block[4];
 } data_t;
 
-
 uint8_t manchester_receive(data_t* data);
+uint8_t check_crc(data_t* data);
 uint8_t manchester_send(data_t* data);
+uint8_t manchester_send_no_crc_calc(data_t* data);
 
 #endif

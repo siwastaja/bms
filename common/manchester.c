@@ -231,7 +231,19 @@ uint8_t manchester_receive(data_t* data)  // Function call 4 clk, function overh
 	return COMM_SUCCESS;
 }
 
-
+uint8_t check_crc(data_t* data)
+{
+	uint8_t remainder = CRC_INITIAL_REMAINDER;
+	remainder ^= (*data).a;
+	CALC_CRC(remainder);
+	remainder ^= (*data).b;
+	CALC_CRC(remainder);
+	remainder ^= (*data).c;
+	CALC_CRC(remainder);
+	if(remainder != (*data).d)
+		return 1;
+	return 0;
+}
 
 uint8_t manchester_send(data_t* data)
 {
@@ -259,6 +271,38 @@ uint8_t manchester_send(data_t* data)
 
 	del_us(25 - 9.375);
 
+
+	for(uint8_t i = 32; i > 0; --i)
+	{
+		if((*data).a & 0b10000000)
+		{
+			ZERO();
+			del_us(25);
+			ONE();
+			del_us(25);
+		}
+		else
+		{
+			ONE();
+			del_us(25);
+			ZERO();
+			del_us(25);
+		}
+		(*data).abcd = (*data).abcd << 1;
+	}
+
+	ONE();
+
+	return COMM_SUCCESS;
+
+}
+
+uint8_t manchester_send_no_crc_calc(data_t* data)
+{
+	ZERO();
+	del_us(25);
+	ONE();
+	del_us(25);
 
 	for(uint8_t i = 32; i > 0; --i)
 	{
