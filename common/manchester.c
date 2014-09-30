@@ -261,7 +261,7 @@ uint8_t manchester_send(data_t* data)
 	CALC_CRC((*data).d);
 	// Grand total 48+24+3 = 75 cycles = 9.375 us.
 
-	del_us(25 - 9.375 - 9.375);
+	del_us(25 - 9.375 - 9.375 - 0.250);
 
 	ONE();
 
@@ -269,7 +269,7 @@ uint8_t manchester_send(data_t* data)
 	CALC_CRC((*data).d);
 	// Grand total 48+24+3 = 75 cycles = 9.375 us.
 
-	del_us(25 - 9.375);
+	del_us(25 - 9.375 - 0.250);
 
 
 	for(uint8_t i = 32; i > 0; --i)
@@ -277,17 +277,17 @@ uint8_t manchester_send(data_t* data)
 		if((*data).a & 0b10000000)
 		{
 			ZERO();
-			del_us(25);
+			del_us(25-0.125);
 			ONE();
-			del_us(25);
 		}
 		else
 		{
 			ONE();
-			del_us(25);
+			del_us(25-0.125);
 			ZERO();
-			del_us(25);
 		}
+		del_us(25-0.125-2.5-0.250);
+
 		(*data).abcd = (*data).abcd << 1;
 	}
 
@@ -300,29 +300,28 @@ uint8_t manchester_send(data_t* data)
 uint8_t manchester_send_no_crc_calc(data_t* data)
 {
 	ZERO();
-	del_us(25);
+	del_us(25.0-0.125);
 	ONE();
-	del_us(25);
+	del_us(25.0-0.125-0.625);
 
 	for(uint8_t i = 32; i > 0; --i)
 	{
 		if((*data).a & 0b10000000)
 		{
 			ZERO();
-			del_us(25);
+			del_us(25-0.125);
 			ONE();
-			del_us(25);
 		}
 		else
 		{
 			ONE();
-			del_us(25);
+			del_us(25-0.125);
 			ZERO();
-			del_us(25);
 		}
-		(*data).abcd = (*data).abcd << 1;
-	}
+		del_us(25-0.125-2.5-0.500);
 
+		(*data).abcd = (*data).abcd << 1;  // 20 cycles = 2.5 us
+	}
 	ONE();
 
 	return COMM_SUCCESS;

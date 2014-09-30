@@ -17,6 +17,7 @@
 // Jumper in     : pin 6 (PB1)
 // Debug pulse   : pin 2 (PB3)
 
+
 #define UART_HI() (PINB&0b100)
 #define UART_HI_BIT() ((PINB&0b100)>>2)
 
@@ -24,7 +25,9 @@
 #define LED_OFF() cbi(PORTB, 0)
 #define PULSE() { sbi(PORTB, 3); cbi(PORTB, 3);}
 
-volatile uint8_t receiving;
+#define ONE()  sbi(PORTB, 4);
+#define ZERO() cbi(PORTB, 4);
+
 
 // Fixed 115200 baud/s on 8 MHz CPU
 // 1 clk cycle = 0.125 us
@@ -72,24 +75,20 @@ int main()
 	PRR = 0b00001111; // Unnecessary peripherals off.
 
 	DDRB  = 0b00011001; // Data out, debug pulse out, led out
-	PORTB = 0b00000010; // Jumper pull-up
+	PORTB = 0b00010010; // Data output high, jumper pull-up
 
 	LED_ON();
 	_delay_ms(250);
 	LED_OFF();
 
-//	GIMSK = 0b00100000; // pin change interrupt enable.
-//	PCMSK = 0b00000100; // PCINT2 enable.
-
+	cli();
 	while(1)
 	{
-		// Read uart here
-
 		data_t packet;
 		uint8_t framing_err = 0;
-		for(uint8_t byte_cnt = 0; byte_cnt < 4; byte_cnt++)
+		for(uint8_t byte_cnt = 4; byte_cnt > 0; byte_cnt--)
 		{
-			if(uart_read_byte_block(&(packet.block[byte_cnt])))
+			if(uart_read_byte_block(&(packet.block[byte_cnt-1])))
 			{
 				framing_err = 1;
 				break;

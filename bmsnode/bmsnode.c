@@ -351,6 +351,7 @@ int main()
 			{
 				if((rcv_data.b & 0b11100000) == 0b10000000)
 				{
+					uint8_t tmp_rcv_data_b = rcv_data.b;
 
 					// Compensate for charge usage difference in the chain.
 					// Later nodes use more charge to relay all the messages from
@@ -372,7 +373,7 @@ int main()
 						rcv_data.c -= 1;
 					}
 
-					uint8_t src = rcv_data.b & 0b00000011;
+					uint8_t src = tmp_rcv_data_b & 0b00000011;
 					MEAS_RESISTOR_SHUNT_OFF();
 					cbi(PRR, 0);
 
@@ -395,11 +396,11 @@ int main()
 						break;
 					}
 
-					if(rcv_data.b & 0b100) // 1V1 reference, else Vcc
+					if(tmp_rcv_data_b & 0b100) // 1V1 reference, else Vcc
 						sbi(ADMUX, 7);
 
 					uint16_t num_meas = 4;
-					if(rcv_data.b & 0b00010000)
+					if(tmp_rcv_data_b & 0b00010000)
 					{	// Long measurement - send old result and relay broadcast
 						reply_data.b = prev_long_meas.hi;
 						reply_data.c = prev_long_meas.lo;
@@ -449,10 +450,10 @@ int main()
 					sbi(PORTB, 3); // disable resistor divider.
 
 
-					if(rcv_data.b & 0b00010000)
+					if(tmp_rcv_data_b & 0b00010000)
 						val_accum.both >>= 9; // /2048 and << 2
 
-					if(rcv_data.b & 0b00001000)
+					if(tmp_rcv_data_b & 0b00001000)
 					{	// Calibrate
 						// V: 0..4095
 						// Offset adjustment range:
@@ -473,7 +474,7 @@ int main()
 
 					val.both = val_accum.lo;
 
-					if(rcv_data.b & 0b00010000)
+					if(tmp_rcv_data_b & 0b00010000)
 					{	// Long measurement
 						prev_long_meas.lo = val.lo;
 						prev_long_meas.hi = 0b01000000 | (src<<4) | (val.hi & 0x0f);
@@ -515,6 +516,7 @@ int main()
 
 					rcv_data.c += 1; // Next node gets the next ID.
 
+					reply_data.a = shadow.own_id;
 					reply_data.b = 0x00;
 					reply_data.c = 0b10110000;
 					manchester_send(&reply_data); // Send Operation Success msg
@@ -576,7 +578,7 @@ int main()
 				{
 					// Send an "unknown command" packet.
 
-					reply_data.b = 0b00100000;
+					reply_data.b = 0x02;
 					reply_data.c = rcv_data.b;
 					manchester_send(&reply_data);
 				}

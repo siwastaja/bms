@@ -126,12 +126,12 @@ Identifier(*1)         Description                       Data byte
 0x01  0b00000001       Operation Not Allowed             Original command byte
 0x02  0b00000010       Unknown Command                   Original command byte
 0x03  0b00000011       Communication error               Error code(*2)
-0x04  0b00000100       EEPROM read checksum error        Eeprom address
+0x04  0b00000100       EEPROM read checksum error        Eeprom address    DEPRECATED, RESERVED
 0x05  0b00000101       EEPROM data                       Data value
 0x06  0b00000110       Self-check status                 Result
 0x07  0b00000111       Reserved
 
-0x70- 0b01abcdef       Measurement data                  8 lowest bits of value
+0x40- 0b01abcdef       Measurement data                  8 lowest bits of value
  0x7f       ^^^^-------cdef: 4 MSbits of value.
           ^^-----------ab: 00 voltage 01 ext sens 10 int temp 11 reserved
      12-bit value is left-aligned. In normal measurement, two lowest bits are always zero.
