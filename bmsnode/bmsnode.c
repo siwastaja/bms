@@ -2,6 +2,8 @@
 // 0x00-0x1f: Non-checksummed area
 // 0x00-0x0f: Boot counters, saturated at 255, indexed with MCUSR.
 // 0x10: Node SW version number
+// 0x11-0x14: serial number (uint32)
+// 0x15: Checksum for SW version and serial number (sum of all bytes)
 
 // 0x20 - 0x3e: checksummed area
 // 0x20: Node ID
@@ -528,7 +530,7 @@ int main()
 				else if(rcv_data.b == 0xb2) // Write 8-bit value
 				{
 					reply_data.c = 0xb2;
-					if(eeprom_change_address == 255)
+					if(eeprom_change_address > 127)
 					{
 						reply_data.b = 0x01; // OP not allowed
 					}
@@ -582,6 +584,9 @@ int main()
 					reply_data.c = rcv_data.b;
 					manchester_send(&reply_data);
 				}
+
+				if(rcv_data.b != 0xb1)
+					eeprom_change_address = 255;
 
 				if(allow_broadcast && (rcv_data.a == BROADCAST_ID))
 				{

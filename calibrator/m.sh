@@ -1,2 +1,2 @@
 #!/bin/bash
-gcc -std=gnu99 calibrator.c -o calibrator
+gcc -std=gnu99 -lm calibrator.c -o calibrator
