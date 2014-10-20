@@ -5,18 +5,15 @@
 
 // 0x20 - 0x3e: checksummed area
 // 0x20: Node ID
-// 0x21: V offset (int8).
-// 0x22: Ext sens offset (int8)
-// 0x23: Int Temp offset (int8).
-// 0x24, 0x25: V gain (uint16)
-// 0x26, 0x27: Ext sens gain (uint16)
-// 0x28, 0x29: Int temp gain (uint16)
-// 0x2a: V temp coeff (int8)
-// 0x2b: Ext sens temp coeff (int8)
-// 0x2c: Int temp temp coeff (int8). Should always be 0.
-// 0x2d: Shift for V (uint8)
-// 0x2e: Shift for ext T (uint8)
-// 0x2f: Shift for int T (uint8)
+// 0x21, 0x22: V offset (int16).
+// 0x23, 0x24: Ext sens offset (int16)
+// 0x25, 0x26: Int Temp offset (int16).
+// 0x27, 0x28: V gain (uint16)
+// 0x29, 0x2a: Ext sens gain (uint16)
+// 0x2b, 0x2c: Int temp gain (uint16)
+// 0x2d: V temp coeff (int8)
+// 0x2e: Ext sens temp coeff (int8)
+// 0x2f: Int temp temp coeff (int8). Should always be 0.
 // 0x30: Checksum of all previous (LSbyte of sum of bytes)
 
 // ...0x3e: Reserved for future use within node code
@@ -28,11 +25,10 @@
 #include <stdio.h>
 
 struct __attribute__ ((__packed__)) 
-	{int8_t offsets[3]; uint16_t gains[3]; int8_t t_coeffs[3]; uint8_t shifts[3];} calib =
-{0,0,0,
-9000, 9000, 4096,
-0,0,0,
-14,14,14};
+	{int16_t offsets[3]; uint16_t gains[3]; int8_t t_coeffs[3];} calib =
+{300,0,0,
+9000, 16384, 4096,
+0,0,0};
 
 int main(int argc, char** argv)
 {

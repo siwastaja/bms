@@ -31,8 +31,8 @@ typedef union __attribute__ ((__packed__))
 } data_t;
 
 int fd;
+int psu_fd;
 int num_nodes = 0;
-
 
 uint8_t calc_crc_byte(uint8_t remainder)
 {
@@ -219,6 +219,8 @@ int node_write_eeprom(int node, int addr, uint8_t data)
 	cmd.b = CMD_ENABLE_EEPROM;
 	cmd.c = addr;
 	uart_send_packet(&cmd);
+
+	usleep(10000);
 
 	cmd.b = CMD_WRITE_EEPROM;
 	cmd.c = data;
@@ -467,16 +469,6 @@ OFS = -20
 Convert 310: 9.090909*(310 + 20) = 3000
 Convert 420: 9.090909*(420 + 20) = 4000
 
-Implementation:
-
-12-bit data in (0...4095)
--= offset: Directly an int8_t (-128..+127)
-
-gain (uint16_t): gain(uint16_t) + (temperature-temp_coeff_midpoint)(int8_t)*temp_coeff(int8_t)
-result = gain(uint16_t) * data(uint16_t with 12 bits) >> shift
-
-Typical values for voltage: gain = 9000, shift = 14
-
 */
 
 #define V_MUX 0
@@ -501,10 +493,15 @@ typedef struct
 	int offset[3];
 	int gain[3];
 	int t_coeff[3];
-	int shift[3];
 } node_t;
 
 node_t nodes[MAX_NODES];
+
+void saturate(int* val, int min, int max)
+{
+	if(*val < min) *val = min;
+	if(*val > max) *val = max;
+}
 
 void calculate_calibration(int n)
 {
@@ -533,29 +530,21 @@ void calculate_calibration(int n)
 
 	double t_coeff = (gain[2] - gain[0]) / (double)(cal[n][2][1].t_act - cal[n][0][1].t_act);
 
-	// Maximize gain and offset values, without going over limits.
-
-	int shift = 0;
-
 	printf("V pre-shift: gain = %lf  ofs = %lf  t_coeff = %lf\n", gain[1], ofs, t_coeff);
-	while(shift < 32)
-	{
-		if(gain[1] >= 32767.0 || t_coeff >= 127.0 || t_coeff <= -127.0)
-			break;
-		gain[1] *= 2.0;
-		t_coeff *= 2.0;
-		shift++;
-	}
-	printf("V post-shift: gain = %lf  ofs = %lf  t_coeff = %lf  shift = %u\n", gain[1], ofs, t_coeff, shift);
-
+	gain[1] *= 16384.0*500.0;
+	t_coeff *= 16384.0*500.0;
+	printf("V post-shift: gain = %lf  ofs = %lf  t_coeff = %lf\n", gain[1], ofs, t_coeff);
 
 	nodes[n].offset[V_MUX] = (int)((ofs<0.0)?(ofs-0.5):(ofs+0.5));
 	nodes[n].gain[V_MUX] = (int)(gain[1]+0.5);
 	nodes[n].t_coeff[V_MUX] = (int)((t_coeff<0.0)?(t_coeff-0.5):(t_coeff+0.5));
-	nodes[n].shift[V_MUX] = shift;
 
-	printf("V Final: gain=%u  ofs = %d  t_coeff = %d  shift = %u\n", nodes[n].gain[V_MUX], nodes[n].offset[V_MUX], 
-		nodes[n].t_coeff[V_MUX], nodes[n].shift[V_MUX]);
+	saturate(&nodes[n].offset[V_MUX], -4096, 4095);
+	saturate(&nodes[n].gain[V_MUX], 0, 65535);
+	saturate(&nodes[n].t_coeff[V_MUX], -128, 127);
+
+	printf("V Final: gain=%u  ofs = %d  t_coeff = %d\n", nodes[n].gain[V_MUX], nodes[n].offset[V_MUX], 
+		nodes[n].t_coeff[V_MUX]);
 
 
 	// Do temperatures.
@@ -576,25 +565,19 @@ void calculate_calibration(int n)
 
 	double t_ofs = (t_ofs1+t_ofs2)/2.0;
 
-	int t_shift = 0;
-
 	printf("T pre-shift: gain = %lf  ofs = %lf\n", t_gain, t_ofs);
-	while(t_shift < 32)
-	{
-		if(t_gain >= 32767.0)
-			break;
-		t_gain *= 2.0;
-		t_shift++;
-	}
-	printf("T post-shift: gain = %lf  ofs = %lf  shift = %u\n", t_gain, t_ofs, t_shift);
+	t_gain *= 16384.0;
+	printf("T post-shift: gain = %lf  ofs = %lf\n", t_gain, t_ofs);
 
 	nodes[n].offset[T_MUX] = (int)((t_ofs<0.0)?(t_ofs-0.5):(t_ofs+0.5));
 	nodes[n].gain[T_MUX] = (int)(t_gain+0.5);
 	nodes[n].t_coeff[T_MUX] = 0;
-	nodes[n].shift[T_MUX] = t_shift;
 
-	printf("T Final: gain=%u  ofs = %d  t_coeff = %d  shift = %u\n", nodes[n].gain[T_MUX], nodes[n].offset[T_MUX], 
-		nodes[n].t_coeff[T_MUX], nodes[n].shift[T_MUX]);
+	saturate(&nodes[n].offset[T_MUX], -4096, 4095);
+	saturate(&nodes[n].gain[T_MUX], 0, 65535);
+
+	printf("T Final: gain=%u  ofs = %d  t_coeff = %d\n", nodes[n].gain[T_MUX], nodes[n].offset[T_MUX], 
+		nodes[n].t_coeff[T_MUX]);
 
 }
 
@@ -629,7 +612,7 @@ int get_values(int id, int get_t, int calibrated)
 		num_replies++;
 		if(reply.abcd == packet.abcd)
 			break;
-		else if((reply.a > num_nodes) || ((reply.b&0b11000000) != 0b01000000))
+		else if((reply.a > num_nodes) || (((reply.b&0b11000000) != 0b01000000) && ((reply.b&0b11000000) != 0)))
 		{
 			printf("Warning: Ignoring unexpected packet %x %x %x %x\n", reply.a, reply.b, reply.c, reply.d);
 			fail_cnt++;
@@ -703,6 +686,31 @@ int get_values(int id, int get_t, int calibrated)
 #define HIBYTE(x) (((x)&0xff00)>>8)
 #define LOBYTE(x) ((x)&0xff)
 
+int send_calibration(int n, int v, int t)
+{
+	int fail = 0;
+	if(v)
+	{
+		fail += node_write_eeprom(n+1, 0x21, LOBYTE(nodes[n].offset[V_MUX]));
+		fail += node_write_eeprom(n+1, 0x22, HIBYTE(nodes[n].offset[V_MUX]));
+		fail += node_write_eeprom(n+1, 0x27, LOBYTE(nodes[n].gain[V_MUX]));
+		fail += node_write_eeprom(n+1, 0x28, HIBYTE(nodes[n].gain[V_MUX]));
+	}
+	if(t)
+	{
+		fail += node_write_eeprom(n+1, 0x25, LOBYTE(nodes[n].offset[T_MUX]));
+		fail += node_write_eeprom(n+1, 0x26, HIBYTE(nodes[n].offset[T_MUX]));
+		fail += node_write_eeprom(n+1, 0x2b, LOBYTE(nodes[n].gain[T_MUX]));
+		fail += node_write_eeprom(n+1, 0x2c, HIBYTE(nodes[n].gain[T_MUX]));
+		fail += node_write_eeprom(n+1, 0x2f, 0);
+	}
+	if(v&&t)
+	{
+		fail += node_write_eeprom(n+1, 0x2d, nodes[n].t_coeff[V_MUX]);
+	}
+	return fail;
+}
+
 void calibration()
 {
 	int measurement_done[3][3] = {{0,0,0},{0,0,0},{0,0,0}};
@@ -728,25 +736,14 @@ void calibration()
 
 		printf("\n");
 
-		int all_done = 1;
-		for(int i=0; i<3; i++) 
-			for(int o=0; o<3; o++) 
-				if(!measurement_done[i][o]) { all_done = 0; break; }
-
-
-		if(all_done)
-		{
-			for(int n = 0; n < num_nodes; n++)
-				calculate_calibration(n);
-			printf("Calibration data done!\n");
-		}
 
 	CALIB_NEW_PROMPT:
 		printf("\n");
 		printf("   [a - f] Change actual voltages/temperatures\n");
 		printf("   [1 - 9] Measure at this point\n");
 		printf("       [p] Print calibration data\n");
-		printf("       [s] Send calibration data to nodes\n");
+		printf("       [s] Send all calibration data to nodes [v] voltage only [t] temp only\n");
+		printf("       [o] Open from file [w] write to file\n");
 		printf("       [Q] Abort and quit calibration\n");
 		printf("> "); fflush(stdout);
 
@@ -801,6 +798,20 @@ void calibration()
 					cal[n][t][v].raw[T_MUX] = nodes[n].raw[T_MUX];
 				}
 			}
+
+			int all_done = 1;
+			for(int i=0; i<3; i++) 
+				for(int o=0; o<3; o++) 
+					if(!measurement_done[i][o]) { all_done = 0; break; }
+
+
+			if(all_done)
+			{
+				for(int n = 0; n < num_nodes; n++)
+					calculate_calibration(n);
+				printf("All points measured; calibration data done!\n");
+			}
+
 		}
 		else if(key == 'p')
 		{
@@ -816,7 +827,7 @@ void calibration()
 					{
 						printf(" (%04u, %04u),", cal[n][t][v].raw[T_MUX], cal[n][t][v].raw[V_MUX]);
 					}
-					printf("\n");
+			//		printf("\n");
 				}
 				printf("\n");
 			}
@@ -825,35 +836,22 @@ void calibration()
 			for(int n = 0; n < num_nodes; n++)
 			{
 				printf("NODE %u CALIBRATION FACTORS\n", n);
-				printf("T_offset = %d, T_gain = %u, T_shift = %u\n", 
-					nodes[n].offset[T_MUX], nodes[n].gain[T_MUX], nodes[n].shift[T_MUX]);
-				printf("V_offset = %d, V_gain = %u, V_t_coeff = %d, V_shift = %u\n",
-					nodes[n].offset[V_MUX], nodes[n].gain[V_MUX], nodes[n].t_coeff[V_MUX],
-					nodes[n].shift[V_MUX]);
-				printf("\n");
+				printf("T_offset = %d, T_gain = %u, ", 
+					nodes[n].offset[T_MUX], nodes[n].gain[T_MUX]);
+				printf("V_offset = %d, V_gain = %u, V_t_coeff = %d\n",
+					nodes[n].offset[V_MUX], nodes[n].gain[V_MUX], nodes[n].t_coeff[V_MUX]);
 			}
+			printf("\n");
 		}
-		else if(key == 's')
+		else if(key == 's' || key == 'v' || key == 't')
 		{
 			printf("Sending calibration to nodes...\n");
 
 			for(int n = 0; n < num_nodes; n++)
 			{
-				int fail = 0;
-				fail += node_write_eeprom(n+1, 0x21, nodes[n].offset[V_MUX]);
-				fail += node_write_eeprom(n+1, 0x23, nodes[n].offset[T_MUX]);
-				fail += node_write_eeprom(n+1, 0x24, LOBYTE(nodes[n].gain[V_MUX]));
-				fail += node_write_eeprom(n+1, 0x25, HIBYTE(nodes[n].gain[V_MUX]));
-				fail += node_write_eeprom(n+1, 0x28, LOBYTE(nodes[n].gain[T_MUX]));
-				fail += node_write_eeprom(n+1, 0x29, HIBYTE(nodes[n].gain[T_MUX]));
-				fail += node_write_eeprom(n+1, 0x2a, nodes[n].t_coeff[V_MUX]);
-				fail += node_write_eeprom(n+1, 0x2c, nodes[n].t_coeff[T_MUX]);
-				fail += node_write_eeprom(n+1, 0x2d, nodes[n].shift[V_MUX]);
-				fail += node_write_eeprom(n+1, 0x2f, nodes[n].shift[T_MUX]);
-
-				if(fail)
+				if(send_calibration(n, (key=='v')||(key=='s'), (key=='t')||(key=='s')))
 				{
-					printf("Error sending data (%u failures at node %u)\n", fail, n+1);
+					printf("Error sending data to node %u\n", n+1);
 				}
 			}
 
@@ -867,8 +865,280 @@ void calibration()
 
 			printf("\nAll calibration data sent to nodes.\n");
 		}
+		else if(key == 'w')
+		{
+			printf("Writing to calib.bin\n");
+			FILE* calfile = fopen("calib.bin", "wb");
+			putc(num_nodes, calfile);
+			printf("sizeof(cal) == %u. sizeof(nodes) == %u\n", sizeof(cal), sizeof(nodes));
+			fwrite((void*)cal, 1, sizeof(cal), calfile); 
+			fwrite((void*)nodes, 1, sizeof(nodes), calfile); 
+			fwrite((void*)measurement_done, 1, sizeof(measurement_done), calfile);
+			fwrite((void*)calib_actual_volts, 1, sizeof(calib_actual_volts), calfile);
+			fwrite((void*)calib_actual_temps, 1, sizeof(calib_actual_temps), calfile);
+			fclose(calfile);
+		}
+		else if(key == 'o')
+		{
+			printf("Reading from calib.bin\n");
+			FILE* calfile = fopen("calib.bin", "rb");
+			num_nodes = getc(calfile);
+			fread((void*)cal, 1, sizeof(cal), calfile);
+			fread((void*)nodes, 1, sizeof(nodes), calfile);
+			fread((void*)measurement_done, 1, sizeof(measurement_done), calfile);
+			fread((void*)calib_actual_volts, 1, sizeof(calib_actual_volts), calfile);
+			fread((void*)calib_actual_temps, 1, sizeof(calib_actual_temps), calfile);
+			fclose(calfile);
+			printf("OK. num_nodes = %u\n", num_nodes);
+		}
 
 	}
+
+}
+
+int psu_clear_err()
+{
+	int cnt = 0;
+	char buf[1000];
+	while(1)
+	{
+		wr(psu_fd, "SYST:ERR?\r\n");
+		buf[0] = 0; buf[1] = 0;
+		int kak = read(psu_fd, buf, 1000);
+		buf[kak] = 0;
+		if(buf[0] == '0' || buf[1] == '0')
+			break;
+
+		printf("PSU: err %u: %s\n", cnt, buf);
+
+		cnt++;
+		if(cnt > 20)
+		{
+			printf("PSU: Error clearing errors (>20 errors).\n");
+			return 20;
+		}
+	}
+	printf("PSU: %u errors cleared\n", cnt);
+	return cnt;
+}
+
+void update_max(int val, int* max)
+{
+	if(val > *max)
+		*max = val;
+}
+
+void update_min(int val, int* min)
+{
+	if(val < *min)
+		*min = val;
+}
+
+void auto_calibration(int load_from_file)
+{
+	char buf[1000];
+
+	if(load_from_file)
+	{
+		printf("Reading from autocal.bin\n");
+		FILE* calfile = fopen("autocal.bin", "rb");
+		if(!calfile)
+		{
+			printf("Couldn't open autocal.bin! Aborting.\n");
+			return;
+		}
+		num_nodes = getc(calfile);
+		fread((void*)cal, 1, sizeof(cal), calfile);
+		fread((void*)nodes, 1, sizeof(nodes), calfile);
+		fclose(calfile);
+		printf("OK. num_nodes = %u\n", num_nodes);
+		goto SKIP_CALIBRATION;
+	}
+
+	psu_clear_err();
+
+	double voltage_cmds[3] = {2.9, 3.5, 4.1};
+	double temp_cmds[3] = {0.0, 23.0, 46.0};
+
+	wr(psu_fd, "OUTP OFF\r\n");
+	wr(psu_fd, "SENS:SWE:POIN 4096\r\n");
+	wr(psu_fd, "SENS:SWE:TINT 4E-5\r\n");
+	sleep(1);
+	wr(psu_fd, "CURR 1\r\n");
+	wr(psu_fd, "VOLT 3.6\r\n");
+	wr(psu_fd, "OUTP ON\r\n");
+
+	for(int t_cnt = 0; t_cnt < 3; t_cnt++)
+	{
+		printf("Enter actual temperature (suggested: %.1f) > ", temp_cmds[t_cnt]);
+		fflush(stdout);
+		double actual_t;
+		T_INPUT_RETRY:
+		scanf("%lf", &actual_t);
+		if(actual_t < -50 || actual_t > 150)
+		{
+			printf("OUT OF RANGE, retry > ");
+			fflush(stdout);
+			goto T_INPUT_RETRY;
+		}
+
+		for(int v_cnt = 0; v_cnt < 3; v_cnt++)
+		{
+			sprintf(buf, "VOLT %f\r\n", voltage_cmds[v_cnt]);
+			wr(psu_fd, buf);
+			sleep(1);
+			wr(psu_fd, "MEAS:VOLT?\r\n");
+			buf[read(psu_fd, buf, 1000)] = 0;
+			double actual_v = atof(buf);
+
+			if(get_values(255, 0, 0) || get_values(255, 1, 0))
+			{
+				printf("Error getting values.\n");
+			}
+			else
+			{
+				for(int n = 0; n < num_nodes; n++)
+				{
+					cal[n][t_cnt][v_cnt].v_act = actual_v;
+					cal[n][t_cnt][v_cnt].t_act = actual_t;
+					cal[n][t_cnt][v_cnt].raw[V_MUX] = nodes[n].raw[V_MUX];
+					cal[n][t_cnt][v_cnt].raw[T_MUX] = nodes[n].raw[T_MUX];
+				}
+			}
+		}
+
+	}
+
+	sprintf(buf, "VOLT %f\r\n", voltage_cmds[1]);
+	wr(psu_fd, buf);
+
+
+	SKIP_CALIBRATION:
+
+	for(int n = 0; n < num_nodes; n++)
+	{
+		calculate_calibration(n);
+	}
+
+	int max_offset[3] = {-999999,-999999,-999999};
+	int min_offset[3] = {999999,999999,999999};
+	int max_gain[3] = {0,0,0};
+	int min_gain[3] = {999999,999999,999999};
+	int max_t_coeff[3] = {-999999,-999999,-999999};
+	int min_t_coeff[3] = {999999,999999,999999};
+	int64_t offset_acc[3] = {0,0,0};
+	int64_t gain_acc[3] = {0,0,0};
+	int64_t t_coeff_acc[3] = {0,0,0};
+
+	for(int n = 0; n < num_nodes; n++)
+	{
+		for(int mux = 0; mux < 3; mux++)
+		{
+			update_max(nodes[n].offset[mux], &max_offset[mux]);
+			update_min(nodes[n].offset[mux], &min_offset[mux]);
+			update_max(nodes[n].gain[mux], &max_gain[mux]);
+			update_min(nodes[n].gain[mux], &min_gain[mux]);
+			update_max(nodes[n].t_coeff[mux], &max_t_coeff[mux]);
+			update_min(nodes[n].t_coeff[mux], &min_t_coeff[mux]);
+			offset_acc[mux] += nodes[n].offset[mux];
+			gain_acc[mux] += nodes[n].gain[mux];
+			t_coeff_acc[mux] += nodes[n].t_coeff[mux];
+		}
+	}
+
+	double avg_offset[3], avg_gain[3], avg_t_coeff[3];
+
+	for(int i = 0; i < 3; i++)
+	{
+		avg_offset[i] = (double)offset_acc[i]/(double)num_nodes;
+		avg_gain[i] = (double)gain_acc[i]/(double)num_nodes;
+		avg_t_coeff[i] = (double)t_coeff_acc[i]/(double)num_nodes;
+	}
+
+	printf("Statistics: \n");
+	printf("V offset:  min=%6d   avg=%7.1f   max=%6d\n", min_offset[V_MUX], avg_offset[V_MUX], max_offset[V_MUX]);
+	printf("V gain:    min=%6d   avg=%7.1f   max=%6d\n", min_gain[V_MUX], avg_gain[V_MUX], max_gain[V_MUX]);
+	printf("V t_coeff: min=%6d   avg=%7.1f   max=%6d\n", min_t_coeff[V_MUX], avg_t_coeff[V_MUX], max_t_coeff[V_MUX]);
+	printf("T offset:  min=%6d   avg=%7.1f   max=%6d\n", min_offset[T_MUX], avg_offset[T_MUX], max_offset[T_MUX]);
+	printf("T gain:    min=%6d   avg=%7.1f   max=%6d\n", min_gain[T_MUX], avg_gain[T_MUX], max_gain[T_MUX]);
+
+	const int do_check[3] = {1, 0, 1};
+	const int offset_max_diff[3]  = {100, 0, 50};
+	const int gain_max_diff[3]    = {1000, 0, 1000};
+	const int t_coeff_max_diff[3] = {20, 0, 20};
+
+	for(int n = 0; n < num_nodes; n++)
+	{
+		for(int mux = 0; mux<3; mux++)
+		{
+			if(!do_check[mux]) continue;
+
+			if(abs(nodes[n].offset[mux] - (int)avg_offset[mux]) > offset_max_diff[mux])
+			{
+				printf("WARN: node %u: offset[%u]=%d differs too much from average (%d)\n",
+					n, mux, nodes[n].offset[mux], (int)avg_offset[mux]);
+			}
+			if(abs(nodes[n].gain[mux] - (int)avg_gain[mux]) > gain_max_diff[mux])
+			{
+				printf("WARN: node %u: gain[%u]=%d differs too much from average (%d)\n",
+					n, mux, nodes[n].gain[mux], (int)avg_gain[mux]);
+			}
+			if(abs(nodes[n].t_coeff[mux] - (int)avg_t_coeff[mux]) > t_coeff_max_diff[mux])
+			{
+				printf("WARN: node %u: t_coeff[%u]=%d differs too much from average (%d)\n",
+					n, mux, nodes[n].t_coeff[mux], (int)avg_t_coeff[mux]);
+			}
+		}
+	}
+
+	printf("Saving calibration data to autocal.bin\n");
+
+	FILE* calfile = fopen("autocal.bin", "wb");
+	if(!calfile)
+	{
+		printf("Couldn't open the file for writing. Not saving.\n");
+	}
+	else
+	{
+		putc(num_nodes, calfile);
+		printf("sizeof(cal) == %u. sizeof(nodes) == %u\n", sizeof(cal), sizeof(nodes));
+		fwrite((void*)cal, 1, sizeof(cal), calfile);
+		fwrite((void*)nodes, 1, sizeof(nodes), calfile);
+		fclose(calfile);
+	}
+
+	__fpurge(stdin);
+	printf("Send calibration to nodes? [a]ll | [v]oltage | [t]emperature | [q]uit  >");
+	AUTOCAL_CMD_TRY_AGAIN:
+	fflush(stdout);
+	char key = getchar();
+	printf("\n");
+	if(key == 'a' || key == 'v' || key == 't')
+	{
+		printf("Sending calibration to nodes...\n");
+		for(int n = 0; n < num_nodes; n++)
+		{
+			if(send_calibration(n, (key=='a')||(key=='v'), (key=='a')||(key=='t')))
+				printf("WARN: Error sending to node %u", n+1);
+		}
+
+		printf("Self-checking nodes...\n");
+		for(int n = 0; n < num_nodes; n++)
+		{
+			if(node_selfcheck(n+1))
+			{
+				printf("WARN: Node %u self-check failed!\n", n+1);
+			}
+		}
+	}
+	else if(key == 'q')
+		return;
+	else
+	{
+		printf(" Try again > ");
+		goto AUTOCAL_CMD_TRY_AGAIN;
+	}
+
 
 }
 
@@ -969,6 +1239,8 @@ void input_packet(data_t* packet)
 	}
 }
 
+
+
 #define RELAY_MAX_REPLIES 300
 
 int main(int argc, char** argv)
@@ -977,7 +1249,15 @@ int main(int argc, char** argv)
 
 	if(argc < 2)
 	{
-		printf("Usage: blah blah\n");
+		printf("Usage: calibrate <bms_serial_device> <q | r | c[a|o] | s[c|r]> [power_supply_device]\n");
+		printf("q = seQuence nodes from 1 and quit.\n");
+		printf("r = message relay mode. (doesn't sequence nodes.)\n");
+		printf("c = enter calibration menu.\n");
+		printf("        a = automated calibration: add HP 6632B power supply device file name.\n");
+		printf("        o = automated calibration: open data from autocal.bin.\n");
+		printf("s = show values.\n");
+		printf("        c = use calibration in nodes. When not specified, default rough conversion used.\n");
+		printf("        r = show raw values (as received) instead of converted numbers.\n");
 		return 1;
 	}
 
@@ -1045,7 +1325,35 @@ int main(int argc, char** argv)
 	else if(argc > 2 && argv[2][0] == 'c')  // Calibration
 	{
 		sequence_nodes();
-		calibration();
+		if(argv[2][1] == 'a')
+		{
+			if(argc > 3)
+			{
+				psu_fd = open(argv[3], O_RDWR | O_NOCTTY | O_SYNC);
+				if(psu_fd < 0)
+				{
+					printf("error %d opening %s: %s\n", errno, argv[3], strerror(errno));
+					return 1;
+				}
+
+				set_interface_attribs(psu_fd, B9600, 0, 1);
+				auto_calibration(0);
+				close(psu_fd);
+			}
+			else
+			{
+				printf("Calibrate Auto was defined, but power supply device file name is missing.\n");
+				return 1;
+			}
+		}
+		else if(argv[2][1] == 'o')
+		{
+			auto_calibration(1);
+		}
+		else
+		{
+			calibration();
+		}
 	}
 	else if(argc > 2 && argv[2][0] == 's') // Show
 	{

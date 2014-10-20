@@ -1,4 +1,4 @@
-#define F_CPU 8000000UL
+#define F_CPU 7372000UL
 
 #include <inttypes.h>
 #include <avr/io.h>
@@ -49,20 +49,27 @@ uint8_t mode = COOL;
 uint8_t clock;
 
 // Port definitions
-#define COOL_PWR_REG joo
-#define HEAT_PWR_REG joo
+#define COOL_PWR_REG OCR1B
+#define HEAT_PWR_REG OCR1A
 
-#define HEAT_ENA_REG joo
-#define HEAT_ENA_PIN 123
-#define COOL_ENA_REG joo
-#define COOL_ENA_PIN 123
+#define HEAT_ENA_REG PORTD
+#define HEAT_ENA_PIN 6
+#define COOL_ENA_REG PORTD
+#define COOL_ENA_PIN 7
 
-#define HEAT_LED_ON()
-#define HEAT_LED_OFF()
-#define COOL_LED_ON()
-#define COOL_LED_OFF()
-#define OK_LED_ON()
-#define OK_LED_OFF()
+#define HEAT_LED_ON()  sbi(PORTD, 3)
+#define HEAT_LED_OFF() cbi(PORTD, 3)
+#define COOL_LED_ON()  sbi(PORTD, 4)
+#define COOL_LED_OFF() cbi(PORTD, 4)
+#define OK_LED_ON()    sbi(PORTD, 2)
+#define OK_LED_OFF()   cbi(PORTD, 2)
+
+#define SENS_PORT_REG PORTC
+#define SENS_PIN_REG  PINC
+#define SENS_1_PIN 4
+#define SENS_2_PIN 3
+#define SENS_3_PIN 5
+#define SENS_4_PIN 2
 
 /* Peltier is driven by a H bridge of four mosfets.
 
@@ -199,8 +206,8 @@ void adjust(int16_t temp_actual, int16_t temp_setpoint)
 
 	update_pwr(new_pwr_16);
 
-	if((abs(temp_setpoint-temp_actual)) <= OK_LED_BLINK_THRESHOLD && clock&1) ||
-	   (abs(temp_setpoint-temp_actual)) <= OK_LED_THRESHOLD))
+	if((abs(temp_setpoint-temp_actual) <= OK_LED_BLINK_THRESHOLD && clock&1) ||
+	   (abs(temp_setpoint-temp_actual) <= OK_LED_THRESHOLD))
 		OK_LED_ON();
 	else
 		OK_LED_OFF();
@@ -210,7 +217,22 @@ void adjust(int16_t temp_actual, int16_t temp_setpoint)
 
 int main()
 {
-
+	DDRD = 0b00011100;
+	while(1)
+	{
+		OK_LED_ON();
+		_delay_ms(100);
+		COOL_LED_ON();
+		_delay_ms(100);
+		HEAT_LED_ON();
+		_delay_ms(300);
+		OK_LED_OFF();
+		_delay_ms(100);
+		COOL_LED_OFF();
+		_delay_ms(100);
+		HEAT_LED_OFF();
+		_delay_ms(300);
+	}
 	return 0;
 }
 

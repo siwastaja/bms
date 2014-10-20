@@ -1,24 +1,34 @@
+//                76543210 76543210 76543210 76543210
+// Val: 0-4095                          XXXX XXXXXXXX
+// Gain: 0-65535                    XXXXXXXX XXXXXXXX
+// Val*Gain:          XXXX XXXXXXXX XXXXXXXX XXXXXXXX
+// Use:                 XX XXXXXXXX XX>>>>>> >>>>>>>>   >>14
+// Gain 16384 = 1.0
+// Max gain ~= 4.0 (3.9999)
+// Fixed shift of 14.
+// Gain = 16-bit.
+// Offset = 16-bit
+// Temp coeff = 8-bit
+
+
 // EEPROM MAP
 // 0x00-0x1f: Non-checksummed area
 // 0x00-0x0f: Boot counters, saturated at 255, indexed with MCUSR.
 // 0x10: Node SW version number
 // 0x11-0x14: serial number (uint32)
-// 0x15: Checksum for SW version and serial number (sum of all bytes)
+// 0x15: Checksum for SW version and serial number (sum of 5 bytes 0x10-0x14)
 
 // 0x20 - 0x3e: checksummed area
 // 0x20: Node ID
-// 0x21: V offset (int8).
-// 0x22: Ext sens offset (int8)
-// 0x23: Int Temp offset (int8).
-// 0x24, 0x25: V gain (uint16)
-// 0x26, 0x27: Ext sens gain (uint16)
-// 0x28, 0x29: Int temp gain (uint16)
-// 0x2a: V temp coeff (int8)
-// 0x2b: Ext sens temp coeff (int8)
-// 0x2c: Int temp temp coeff (int8). Should always be 0.
-// 0x2d: Shift for V (uint8)
-// 0x2e: Shift for ext T (uint8)
-// 0x2f: Shift for int T (uint8)
+// 0x21, 0x22: V offset (int16).
+// 0x23, 0x24: Ext sens offset (int16)
+// 0x25, 0x26: Int Temp offset (int16).
+// 0x27, 0x28: V gain (uint16)
+// 0x29, 0x2a: Ext sens gain (uint16)
+// 0x2b, 0x2c: Int temp gain (uint16)
+// 0x2d: V temp coeff (int8)
+// 0x2e: Ext sens temp coeff (int8)
+// 0x2f: Int temp temp coeff (int8). Should always be 0.
 // 0x30: Checksum of all previous (LSbyte of sum of bytes)
 
 // ...0x3e: Reserved for future use within node code
@@ -150,15 +160,15 @@ typedef union
 
 typedef union
 {
-	uint32_t both;
-	struct { uint16_t lo; uint16_t hi; };
+	uint32_t both32;
+	struct { uint16_t lo16; uint16_t hi16; };
 } union32_t;
 
 #define SHADOW_LEN 16
 
 typedef union
 {
-	struct { uint8_t own_id; int8_t offsets[3]; union16_t gains[3]; int8_t t_coeffs[3]; uint8_t shifts[3];};
+	struct { uint8_t own_id; int16_t offsets[3]; union16_t gains[3]; int8_t t_coeffs[3];};
 	uint8_t all[SHADOW_LEN];
 } shadow_t;
 
@@ -433,7 +443,7 @@ int main()
 					sbi(GIFR, 5); // Clear PCINT flag.
 
 					union32_t val_accum;
-					val_accum.both = 0;
+					val_accum.both32 = 0;
 
 					while(num_meas--)
 					{
@@ -443,7 +453,7 @@ int main()
 						cli();
 						MCUCR = 0b00000000;
 
-						val_accum.both += ADC;
+						val_accum.both32 += ADC;
 					}
 
 					ADCSRA = 0b00001110;  // disable ADC, disable ADC interrupt, clear int flag, prescaler 64 (125 kHz)
@@ -453,14 +463,16 @@ int main()
 
 
 					if(tmp_rcv_data_b & 0b00010000)
-						val_accum.both >>= 9; // /2048 and << 2
+						val_accum.both32 >>= 9; // /2048 and << 2
 
 					if(tmp_rcv_data_b & 0b00001000)
 					{	// Calibrate
 						// V: 0..4095
-						// Offset adjustment range:
-						// +/- 3.1% (0.024% step)
-						val_accum.lo -= shadow.offsets[src]; // guaranteed to be 16-bit here
+						// val_accum guaranteed to fit in 16 bit here.
+						if(val_accum.lo16 > shadow.offsets[src])
+							val_accum.lo16 -= shadow.offsets[src];
+						else
+							val_accum.lo16 = 0;
 
 						uint16_t gain = shadow.gains[src].both;
 
@@ -468,13 +480,16 @@ int main()
 						temp_corr >>= 8;
 						gain += temp_corr;
 
-						val_accum.both *= gain;
-						val_accum.both >>= shadow.shifts[src];
+						val_accum.both32 *= gain;
+						val_accum.both32 >>= 14;
+
+						if(val_accum.lo16 > 4095)
+							val_accum.lo16 = 4095;
 					}
 
 					union16_t val;
 
-					val.both = val_accum.lo;
+					val.both = val_accum.lo16;
 
 					if(tmp_rcv_data_b & 0b00010000)
 					{	// Long measurement
