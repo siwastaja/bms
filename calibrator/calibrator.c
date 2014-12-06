@@ -32,6 +32,7 @@ typedef union __attribute__ ((__packed__))
 
 int fd;
 int psu_fd;
+int oven_fd;
 int num_nodes = 0;
 
 uint8_t calc_crc_byte(uint8_t remainder)
@@ -56,6 +57,20 @@ void insert_crc(data_t* data)
 	remainder ^= (*data).c;
 	remainder = calc_crc_byte(remainder);
 	(*data).d = remainder;
+}
+
+uint8_t check_crc_error(data_t* data)
+{
+	uint8_t remainder = CRC_INITIAL_REMAINDER;
+	remainder ^= (*data).a;
+	remainder = calc_crc_byte(remainder);
+	remainder ^= (*data).b;
+	remainder = calc_crc_byte(remainder);
+	remainder ^= (*data).c;
+	remainder = calc_crc_byte(remainder);
+	if((*data).d != remainder)
+		return 1;
+	return 0;
 }
 
 int kbhit()
@@ -122,7 +137,7 @@ void uart_send_packet(data_t* packet)
 	insert_crc(packet);
 	uint8_t buf[4] = {packet->a,packet->b,packet->c,packet->d};
 	write(fd, buf, 4);
-//	printf("Sent %x %x %x %x\n", buf[0], buf[1], buf[2], buf[3]);
+	printf("Sent %02x %02x %02x %02x\n", buf[0], buf[1], buf[2], buf[3]);
 }
 
 int uart_read_packet(data_t* packet)
@@ -137,7 +152,10 @@ int uart_read_packet(data_t* packet)
 	packet->b = buf[1];
 	packet->c = buf[2];
 	packet->d = buf[3];
-//	printf("Rcvd %x %x %x %x\n", buf[0], buf[1], buf[2], buf[3]);
+	printf("Rcvd %02x %02x %02x %02x\n", buf[0], buf[1], buf[2], buf[3]);
+	if(check_crc_error(packet))
+		printf("WARN: CRC error in packet %02x %02x %02x %02x\n", buf[0], buf[1], buf[2], buf[3]);
+
 	return 0;
 }
 
@@ -239,6 +257,8 @@ int node_write_eeprom(int node, int addr, uint8_t data)
 
 void parse_message(data_t* packet)
 {
+	if(check_crc_error(packet))
+		printf("    ERR: CRC8 mismatch\n");
 	if(packet->a == 255 && ((packet->b)&0b10000000))
 		printf("    master's own broadcast message coming back\n");
 	else if(packet->a == 255)
@@ -505,6 +525,7 @@ void saturate(int* val, int min, int max)
 
 void calculate_calibration(int n)
 {
+	printf("Calibration for node %u\n", n);
 	double gain[3];
 	gain[1] = (double)(cal[n][1][2].v_act - cal[n][1][0].v_act) /
 		(double)(cal[n][1][2].raw[V_MUX] - cal[n][1][0].raw[V_MUX]);
@@ -530,10 +551,12 @@ void calculate_calibration(int n)
 
 	double t_coeff = (gain[2] - gain[0]) / (double)(cal[n][2][1].t_act - cal[n][0][1].t_act);
 
-	printf("V pre-shift: gain = %lf  ofs = %lf  t_coeff = %lf\n", gain[1], ofs, t_coeff);
+	printf("V pre-shift: gain = %lf %lf %lf  ofs = %lf  t_coeff = %lf\n", gain[0], gain[1], gain[2], ofs, t_coeff);
 	gain[1] *= 16384.0*500.0;
-	t_coeff *= 16384.0*500.0;
-	printf("V post-shift: gain = %lf  ofs = %lf  t_coeff = %lf\n", gain[1], ofs, t_coeff);
+	gain[0] *= 16384.0*500.0;
+	gain[2] *= 16384.0*500.0;
+	t_coeff *= 16384.0*500.0*8.0;
+	printf("V post-shift: gain = %lf %lf %lf ofs = %lf  t_coeff = %lf\n", gain[0], gain[1], gain[2], ofs, t_coeff);
 
 	nodes[n].offset[V_MUX] = (int)((ofs<0.0)?(ofs-0.5):(ofs+0.5));
 	nodes[n].gain[V_MUX] = (int)(gain[1]+0.5);
@@ -918,7 +941,8 @@ int psu_clear_err()
 			return 20;
 		}
 	}
-	printf("PSU: %u errors cleared\n", cnt);
+	if(cnt > 0)
+		printf("PSU: %u errors cleared\n", cnt);
 	return cnt;
 }
 
@@ -934,9 +958,103 @@ void update_min(int val, int* min)
 		*min = val;
 }
 
+// -1 = timeout
+// 0 = nl not found, buffer full
+// others = location of terminating 0 (string length)
+int read_until_nl_timeout(int fd, char* buf, int buflen, int timeout_ms)
+{
+	int loc = 0;
+	char* nl_loc = 0;
+	int timeout = 0;
+	do
+	{
+		if(loc >= buflen-1)
+			break;
+		loc += read(fd, &(buf[loc]), buflen-1-loc);
+		buf[loc] = 0;
+		usleep(1000);
+		timeout++;
+		if(timeout == timeout_ms)
+			break;
+	}
+	while((nl_loc = strchr(buf, '\n')) == 0);
+
+	if(loc >= buflen-1)
+		return 0;
+
+	if(timeout == timeout_ms)
+		return -1;
+
+	return (int)(nl_loc - buf);
+}
+
+int replace_strchr(char* str, char from, char to)
+{
+	int n = 0;
+	char* p_loc;
+	while((p_loc = strchr(str, from)) != 0)
+	{
+		*p_loc = to;
+		n++;
+	}
+	return n;
+}
+
+void sequence_nodes(int start_addr)
+{
+	data_t packet;
+	packet.a= BROADCAST_ADDR;
+	packet.b = CMD_CHANGE_NODE_ID;
+	packet.c = start_addr;
+
+
+	num_nodes = 0;
+	uart_send_packet(&packet);
+
+	for(int i = 0; i < MAX_NODES*2; i++)
+	{
+		data_t reply;
+		uart_read_packet(&reply);
+		if(reply.a == packet.a && reply.b == packet.b)
+		{
+			break;
+		}
+		else if(reply.b == REPLY_OP_SUCCESS && reply.c == CMD_CHANGE_NODE_ID)
+		{
+			if(reply.a != start_addr)
+				printf("Warning: Reply count %u disagrees with reported node ID %u\n", start_addr, reply.a);
+			nodes[num_nodes].id = reply.a;
+			num_nodes++;
+			start_addr++;
+		}
+		else
+		{
+			printf("Warning: Ignoring unexpected packet %x %x %x %x\n", reply.a, reply.b, reply.c, reply.d);
+		}
+	}
+
+	printf("Found %u nodes.\n", num_nodes);
+
+
+}
+
+
+
 void auto_calibration(int load_from_file)
 {
 	char buf[1000];
+
+	psu_clear_err();
+
+	wr(psu_fd, "OUTP OFF\r\n");
+	wr(psu_fd, "SENS:SWE:POIN 4096\r\n");
+	wr(psu_fd, "SENS:SWE:TINT 4E-5\r\n");
+	sleep(1);
+	wr(psu_fd, "CURR 1\r\n");
+	wr(psu_fd, "VOLT 3.6\r\n");
+	wr(psu_fd, "OUTP ON\r\n");
+	sleep(1);
+	sequence_nodes(1);
 
 	if(load_from_file)
 	{
@@ -955,45 +1073,97 @@ void auto_calibration(int load_from_file)
 		goto SKIP_CALIBRATION;
 	}
 
-	psu_clear_err();
 
 	double voltage_cmds[3] = {2.9, 3.5, 4.1};
-	double temp_cmds[3] = {0.0, 23.0, 46.0};
-
-	wr(psu_fd, "OUTP OFF\r\n");
-	wr(psu_fd, "SENS:SWE:POIN 4096\r\n");
-	wr(psu_fd, "SENS:SWE:TINT 4E-5\r\n");
-	sleep(1);
-	wr(psu_fd, "CURR 1\r\n");
-	wr(psu_fd, "VOLT 3.6\r\n");
-	wr(psu_fd, "OUTP ON\r\n");
+	double actual_t = 0.0;
+	int temp_cmds[3] = {6, 23, 40};
 
 	for(int t_cnt = 0; t_cnt < 3; t_cnt++)
 	{
-		printf("Enter actual temperature (suggested: %.1f) > ", temp_cmds[t_cnt]);
-		fflush(stdout);
-		double actual_t;
-		T_INPUT_RETRY:
-		scanf("%lf", &actual_t);
-		if(actual_t < -50 || actual_t > 150)
+		printf("Commanding temperature %u.0, starting oven.\n", temp_cmds[t_cnt]);
+		sleep(2);
+		tcflush(oven_fd, TCIOFLUSH);
+		sleep(1);
+
+		sprintf(buf, ";SET%u;", temp_cmds[t_cnt]);
+		wr(oven_fd, buf);
+		usleep(10000);
+		wr(oven_fd, ";ON;");
+		int stable_cnt = 0;
+		for(int i = 0;; i++)
 		{
-			printf("OUT OF RANGE, retry > ");
-			fflush(stdout);
-			goto T_INPUT_RETRY;
+			int loc = read_until_nl_timeout(oven_fd, buf, 1000, 5000);
+			if(loc == -1)
+			{
+				printf("\nERROR: Temperature controller data fetch timeouted.\n");
+			}
+			else if(loc == 0)
+			{
+				printf("\nERROR: Temperature controller buffer full without newline.\n");
+			}
+			else
+			{
+				if(i < 3)
+				{
+//					printf("ignoring a few first rounds...\n");
+					printf(".");
+					fflush(stdout);
+					continue;
+				}
+
+				replace_strchr(buf, '\r', ' ');
+				replace_strchr(buf, '\n', ' ');
+				char* p_tavg  = strstr(buf, "Tavg=");
+				char* p_tdiff = strstr(buf, "Tdiff=");
+				char* p_tset  = strstr(buf, "Tset=");
+				char* p_stable = strstr(buf, "STABLE");
+
+				float tavg, tdiff, tset;
+
+				sscanf(p_tavg, "Tavg=%f", &tavg);
+				sscanf(p_tdiff, "Tdiff=%f", &tdiff);
+				sscanf(p_tset, "Tset=%f", &tset);
+
+				printf("%s  STA=%u               \r", buf,stable_cnt);
+				fflush(stdout);
+
+				if((int)tset != temp_cmds[t_cnt])
+				{
+					printf("\nFATAL ERROR: Tset differs from temperature command (cmd=%d, Tset=%f)\n",
+						temp_cmds[t_cnt], tset);
+					// todo: stop & quit
+				}
+
+				if((fabs(tavg - tset) < 0.5) && p_stable && tdiff < 0.4)
+					stable_cnt++;
+
+				if(stable_cnt > 2) // todo: 240
+				{
+					printf("\nOven stable, measuring nodes...\n");
+					actual_t = tavg;
+					break;
+				}
+
+			}
+
 		}
 
 		for(int v_cnt = 0; v_cnt < 3; v_cnt++)
 		{
+			printf("Measuring at %f V.\n", voltage_cmds[v_cnt]);
+			psu_clear_err();
+			sleep(1);
 			sprintf(buf, "VOLT %f\r\n", voltage_cmds[v_cnt]);
 			wr(psu_fd, buf);
-			sleep(1);
+			wr(psu_fd, "OUTP ON\r\n");
+			sleep(5);
 			wr(psu_fd, "MEAS:VOLT?\r\n");
 			buf[read(psu_fd, buf, 1000)] = 0;
 			double actual_v = atof(buf);
 
 			if(get_values(255, 0, 0) || get_values(255, 1, 0))
 			{
-				printf("Error getting values.\n");
+				printf("Error getting values from nodes.\n");
 			}
 			else
 			{
@@ -1007,10 +1177,22 @@ void auto_calibration(int load_from_file)
 			}
 		}
 
-	}
+		sprintf(buf, "VOLT %f\r\n", voltage_cmds[1]);
+		wr(psu_fd, buf);
 
-	sprintf(buf, "VOLT %f\r\n", voltage_cmds[1]);
-	wr(psu_fd, buf);
+		printf("Commanding oven off.\n");
+		wr(oven_fd, ";OFF;");
+		if(t_cnt < 2)
+		{
+			int wait = 120;
+			while(--wait)
+			{
+				printf("%u...  \r", wait);
+				fflush(stdout);
+				sleep(1);
+			}
+		}
+	}
 
 
 	SKIP_CALIBRATION:
@@ -1142,41 +1324,6 @@ void auto_calibration(int load_from_file)
 
 }
 
-void sequence_nodes()
-{
-	data_t packet;
-	packet.a= BROADCAST_ADDR;
-	packet.b = CMD_CHANGE_NODE_ID;
-	packet.c = 1;
-
-	uart_send_packet(&packet);
-
-	for(int i = 0; i < MAX_NODES*2; i++)
-	{
-		data_t reply;
-		uart_read_packet(&reply);
-		if(reply.a == packet.a && reply.b == packet.b)
-		{
-			break;
-		}
-		else if(reply.b == REPLY_OP_SUCCESS && reply.c == CMD_CHANGE_NODE_ID)
-		{
-			if(reply.a != num_nodes+1)
-				printf("Warning: Reply count %u disagrees with reported node ID %u\n", num_nodes+1, reply.a);
-			nodes[num_nodes].id = reply.a;
-			num_nodes++;
-		}
-		else
-		{
-			printf("Warning: Ignoring unexpected packet %x %x %x %x\n", reply.a, reply.b, reply.c, reply.d);
-		}
-	}
-
-	printf("Found %u nodes.\n", num_nodes);
-
-
-}
-
 #define UP2LO(c) if((c) >= 'A' && (c) <= 'F') (c) = (c) - 'A' + 'a';
 #define HEX2NUM(c) (((c)>='a')?((c)-'a'+10):((c)-'0'))
 #define HEXVALID(c) ((((c)>='a' && (c)<='f') || ((c)>='0' && (c)<='9')))
@@ -1249,7 +1396,7 @@ int main(int argc, char** argv)
 
 	if(argc < 2)
 	{
-		printf("Usage: calibrate <bms_serial_device> <q | r | c[a|o] | s[c|r]> [power_supply_device]\n");
+		printf("Usage: calibrate <bms_serial_device> <q | r | c[a|o] | s[c|r]> [power_supply_device] [oven_device]\n");
 		printf("q = seQuence nodes from 1 and quit.\n");
 		printf("r = message relay mode. (doesn't sequence nodes.)\n");
 		printf("c = enter calibration menu.\n");
@@ -1274,7 +1421,19 @@ int main(int argc, char** argv)
 
 	if(argc > 2 && argv[2][0] == 'q') // sequence
 	{
-		sequence_nodes();
+		int start = 1;
+		if(argc > 3)
+		{
+			start = atoi(argv[3]);
+			if(start < 0 || start > 254)
+			{
+				printf("Invalid start parameter\n");
+				start = 1;
+			}
+		}
+
+		printf("Sequencing from %u.\n", start);
+		sequence_nodes(start);
 	}
 	if(argc > 2 && argv[2][0] == 'r') // Relay
 	{
@@ -1324,34 +1483,40 @@ int main(int argc, char** argv)
 	}
 	else if(argc > 2 && argv[2][0] == 'c')  // Calibration
 	{
-		sequence_nodes();
-		if(argv[2][1] == 'a')
+		if(argv[2][1] == 'a' || argv[2][1] == 'o')
 		{
-			if(argc > 3)
+			if(argc > 4)
 			{
 				psu_fd = open(argv[3], O_RDWR | O_NOCTTY | O_SYNC);
 				if(psu_fd < 0)
 				{
-					printf("error %d opening %s: %s\n", errno, argv[3], strerror(errno));
+					printf("error %d opening Power Supply %s: %s\n", errno, argv[3], strerror(errno));
 					return 1;
 				}
 
 				set_interface_attribs(psu_fd, B9600, 0, 1);
-				auto_calibration(0);
+
+				oven_fd = open(argv[4], O_RDWR | O_NOCTTY | O_SYNC);
+
+				if(oven_fd < 0)
+				{
+					printf("error %d opening Oven %s: %s\n", errno, argv[4], strerror(errno));
+					return 1;
+				}
+				set_interface_attribs(oven_fd, B115200, 0, 1);
+
+				auto_calibration(argv[2][1]=='o');
 				close(psu_fd);
 			}
 			else
 			{
-				printf("Calibrate Auto was defined, but power supply device file name is missing.\n");
+				printf("Calibrate Auto was defined, but power supply and oven device names are missing.\n");
 				return 1;
 			}
 		}
-		else if(argv[2][1] == 'o')
-		{
-			auto_calibration(1);
-		}
 		else
 		{
+			sequence_nodes(1);
 			calibration();
 		}
 	}
@@ -1363,7 +1528,7 @@ int main(int argc, char** argv)
 			calibrated = 1;
 		else if(argv[2][1] == 'r')
 			raw = 1;
-		sequence_nodes();
+		sequence_nodes(1);
 		while(1)
 		{
 			get_values(255, 1, calibrated);
@@ -1374,7 +1539,7 @@ int main(int argc, char** argv)
 				if(raw)
 					printf("(%02u:T=%04u, V=%04u)\n", i+1, nodes[i].raw[T_MUX], nodes[i].raw[V_MUX]);
 				else
-					printf("(%02u:T=%4.3f, V=%5.4f)\n", i+1, nodes[i].t, nodes[i].v);
+					printf("(%02u:T=%4.3f, V=%5.4f)\n", i+1, nodes[i].t+273.15, nodes[i].v);
 			}
 
 			printf("\n");

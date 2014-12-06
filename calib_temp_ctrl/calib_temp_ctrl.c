@@ -23,6 +23,9 @@
 // Temperature unit = 0.1 K
 // signed ints used because temperatures are subtracted all the time to get differences.
 
+int16_t temp_last_avg = K_AT_0C+230;
+int16_t temp_setpoint = K_AT_0C+200;
+
 // Time unit = 1 second.
 
 uint16_t max_peak_pwr[2] = {65535, 30000};
@@ -31,7 +34,7 @@ uint16_t max_avg_pwr[2] = {65535, 20000};
 int16_t ambient_temp = 235 + K_AT_0C;
 
 // steady-state power requirement (heat escape) per temp unit of difference from ambient temp
-int16_t steady_pwr_per_unit[2] = {100, 50};
+int16_t steady_pwr_per_unit[2] = {320, 50};
 
 // P factor (pwr per unit of temp difference from setpoint)
 // must be int16_t so that * goes ok.
@@ -267,14 +270,23 @@ void update_pwr(uint16_t pwr)
 	if(mode == OFF)
 		return;
 
+//	print_string("upd_p ");
+//	utoa(pwr,tmpstr,10); print_string(tmpstr); print_char(' ');
+
+//	if(mode == HEAT)
+//		print_string(" J1 ");
+
 	if(pwr > max_peak_pwr[mode])
+	{
 		pwr = max_peak_pwr[mode];
+//		print_string(" J2 ");
+	}
 
 	uint16_t pwr_avg_next = (pwr + CUMUL_AVG_LEN*(uint32_t)pwr_avg) / (CUMUL_AVG_LEN+1);
 
-	if(pwr_avg_next > max_avg_pwr[mode])
+	if((pwr_avg_next > max_avg_pwr[mode]) && (pwr > max_avg_pwr[mode]))
 	{
-		pwr -= (pwr_avg_next-max_avg_pwr[mode])*CUMUL_AVG_LEN;
+		pwr = max_avg_pwr[mode];
 		pwr_avg_next = (pwr + CUMUL_AVG_LEN*(uint32_t)pwr_avg) / (CUMUL_AVG_LEN+1);
 	}
 
@@ -293,11 +305,10 @@ void update_pwr(uint16_t pwr)
 		sbi(HEAT_ENA_REG, HEAT_ENA_PIN);
 	}
 
-//	print_string("upd_p ");
 //	if(mode == COOL) print_string("C ");
 //		else print_string("H ");
-//	itoa(pwr,tmpstr,10); print_string(tmpstr); print_char(' ');
-//	itoa(pwr_avg,tmpstr,10); print_string(tmpstr); print_string("\r\n");
+//	utoa(pwr,tmpstr,10); print_string(tmpstr); print_char(' ');
+//	utoa(pwr_avg,tmpstr,10); print_string(tmpstr); print_string("\r\n");
 }
 
 #define abs_own(x) (((x)<0)?(-1*(x)):(x))
@@ -468,8 +479,6 @@ char* comp_str(char* str1, char* str2)
 	return str1;
 }
 
-int16_t temp_setpoint = K_AT_0C+200;
-
 ISR(USART_RXC_vect)
 {
 	char byte = UDR;
@@ -490,6 +499,17 @@ ISR(USART_RXC_vect)
 			{
 				temp_setpoint = K_AT_0C+new_setpoint*10;
 			}
+		}
+		else if(comp_str(rx_buf, "ON"))
+		{
+			if(mode == OFF)
+			{
+				if(temp_last_avg >= temp_setpoint)
+					mode = COOL;
+				else
+					mode = HEAT;
+			}
+			update_mode();
 		}
 		else if(comp_str(rx_buf, "COOL"))
 		{
@@ -550,7 +570,6 @@ int main()
 	cbi(HEAT_ENA_REG, HEAT_ENA_PIN);
 
 	int16_t temps[3];
-	int16_t temp_last_avg = K_AT_0C+230;
 
 	read_temp(SENS_1_PIN);
 	read_temp(SENS_2_PIN);

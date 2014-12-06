@@ -224,7 +224,9 @@ volatile uint8_t receiving = 0;
 #define EXT_SENS_PU 3
 
 // Stack: about 34 bytes + 10 from functions = 44
-// Available sram for globals = about 80 bytes
+// Available srm for globals = about 80 bytes
+int main() __attribute__((noreturn));
+
 int main()
 {
 	uint8_t shunting = 0;
@@ -233,7 +235,7 @@ int main()
 	uint8_t shunt_devices = 0b11;
 	uint8_t eeprom_change_address = 255;
 	uint8_t debug = 0;
-	uint8_t bod_disable = 0;
+//	uint8_t bod_disable = 0;
 
 	union16_t prev_long_meas;
 	prev_long_meas.both = 0;
@@ -299,39 +301,39 @@ int main()
 	  NO_RX_BACK_TO_SLEEP:
 	  	sbi(GIFR,5); // Clear PCINT flag.
 	  	sei();
-		if(bod_disable)
-		{
+//		if(bod_disable)
+//		{
 			// AVR team has come up with a hilarious
 			// "timed sequence" which goes like this:
-			MCUCR = 0b10000100;
+//			MCUCR = 0b10000100;
 			// max 4 clock cycles between these two
-			MCUCR = 0b10110000;
+//			MCUCR = 0b10110000;
 			// Sleep must be entered in 3 clock cycles
-		}
-		else
-		{
-			MCUCR = 0b00110000;
-		}
+//		}
+//		else
+//		{
+		MCUCR = 0b00110000;
+//		}
 		__asm__ __volatile__("sleep");
 		// NORMALLY, the program stays exactly here, until there is a falling
 		// edge on the input pin.
 		cli(); // 1 clk
 		MCUCR = 0b00000000;  // 1 clk
+//		bod_disable = 0;
 
 		if(!receiving)
 		{	// Interrupt came, but ISR did not set the flag
 			// (pulse was filtered out by ISR)
 			goto NO_RX_BACK_TO_SLEEP; 
 		}
-		// 4 clk
 
       SHUNT_RECEIVE:
 		MEAS_RESISTOR_SHUNT_OFF();
 
-		receiving = 0; // 2 clk
+		receiving = 0;
 
 		// Grand total from the edge: 15 us (measured).
-		// (Added MEAS_RESISTOR_SHUNT_OFF() and LED_OFF() since then,
+		// (Added MEAS_RESISTOR_SHUNT_OFF(), LED_OFF() and bod_disable = 0 since then,
                 // but shouldn't make big difference.
 
 		if(debug)
@@ -477,7 +479,7 @@ int main()
 						uint16_t gain = shadow.gains[src].both;
 
 						int16_t temp_corr = (int16_t)shadow.t_coeffs[src] * (int16_t)last_temp_diff;
-						temp_corr >>= 8;
+						temp_corr >>= 3;
 						gain += temp_corr;
 
 						val_accum.both32 *= gain;
@@ -491,22 +493,29 @@ int main()
 
 					val.both = val_accum.lo16;
 
-					if(tmp_rcv_data_b & 0b00010000)
-					{	// Long measurement
-						prev_long_meas.lo = val.lo;
-						prev_long_meas.hi = 0b01000000 | (src<<4) | (val.hi & 0x0f);
-					}
-					else
-					{	// Single
-						reply_data.b = 0b01000000 | (src<<4) | (val.hi & 0x0f);
-						reply_data.c = val.lo;
-						manchester_send(&reply_data);
-					}
-
 					if(src == INT_TEMP)
 					{	// Store chip temperature result for future corrections
 						last_temp_diff = (int16_t)val.both-273-23;
 					}
+
+					// Result is 0b01000000 | (src<<4) | val.hi&0x0f.
+					// This optimization removed about 22 bytes.
+					src |= 0b00000100;
+					src <<= 4;
+					src |= (val.hi & 0x0f);
+
+					if(tmp_rcv_data_b & 0b00010000)
+					{	// Long measurement
+						prev_long_meas.lo = val.lo;
+						prev_long_meas.hi = src; // | (val.hi & 0x0f);
+					}
+					else
+					{	// Single
+						reply_data.b = src; // | (val.hi & 0x0f);
+						reply_data.c = val.lo;
+						manchester_send(&reply_data);
+					}
+
 
 					cbi(PORTB, 5); // Ext sens pull-up off
 					sbi(GIMSK, 5); // Re-enable pin change interrupt
@@ -562,7 +571,7 @@ int main()
 				}
 				else if(rcv_data.b == 0xb3) // Set state
 				{
-					bod_disable = rcv_data.c & 1;
+//					bod_disable = rcv_data.c & 1;
 					debug = rcv_data.c & 2;
 
 					reply_data.b = 0x00; // OP OK
@@ -617,7 +626,6 @@ int main()
 
 	}
 
-	return 0;
 }
 
 
@@ -651,8 +659,7 @@ ISR(PCINT0_vect)
 	// the interrupt came, so go back where we were.
 } // Grand total from the edge 12 us.
 
-ISR(ADC_vect)
-{
-	// Function stub needed here to get back from ADC Noise Reduction Sleep when
-	// the conversion is done.
-}
+EMPTY_INTERRUPT(ADC_vect)
+// Function stub needed here to get back from ADC Noise Reduction Sleep when
+// the conversion is done.
+
