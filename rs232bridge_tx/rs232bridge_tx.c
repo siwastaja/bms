@@ -33,8 +33,9 @@
 // 1 clk cycle = 0.125 us
 // 8.68 us/symbol
 // 69.4 clk cycles per symbol
+// timeout=0 -> no timeout
 
-uint8_t uart_read_byte_block(uint8_t* out)
+uint8_t uart_read_byte_block(uint8_t* out, uint16_t timeout)
 {
 	uint8_t byte = 0;
 	while(1)
@@ -44,6 +45,12 @@ uint8_t uart_read_byte_block(uint8_t* out)
 			_delay_us(1.0);
 			if(!UART_HI())
 				break;
+		}
+		if(timeout)
+			timeout--;
+		if(timeout == 1)
+		{
+			return 1;
 		}
 	}
 
@@ -65,10 +72,12 @@ uint8_t uart_read_byte_block(uint8_t* out)
 
 	PULSE();
 	if(!UART_HI())
-		return 1;
+		return 2;
 	*out = byte;
 	return 0;
 }
+
+#define TIMEOUT 10000
 
 int main()
 {
@@ -85,19 +94,18 @@ int main()
 	while(1)
 	{
 		data_t packet;
-		uint8_t framing_err = 0;
+		uint8_t err = 0;
 		for(uint8_t byte_cnt = 4; byte_cnt > 0; byte_cnt--)
 		{
-			if(uart_read_byte_block(&(packet.block[byte_cnt-1])))
+			if((err = uart_read_byte_block(&(packet.block[byte_cnt-1]), (byte_cnt==4)?0:TIMEOUT)))
 			{
-				framing_err = 1;
 				break;
 			}
 		}
 
 		LED_ON();
 
-		if(framing_err || check_crc(&packet))
+		if(err || check_crc(&packet))
 		{
 			_delay_ms(500);
 		}

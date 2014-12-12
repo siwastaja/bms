@@ -104,8 +104,14 @@ int set_interface_attribs(int fd, int speed, int parity, int should_block)
 
 	tty.c_cflag = (tty.c_cflag & ~CSIZE) | CS8;
 	tty.c_iflag &= ~IGNBRK;
+	tty.c_iflag &= ~INLCR;
+	tty.c_iflag &= ~ICRNL;
 	tty.c_lflag = 0;
 	tty.c_oflag = 0;
+	tty.c_oflag &= ~ONLCR;
+	tty.c_oflag &= ~OCRNL;
+	tty.c_oflag &= ~ONLRET;
+	tty.c_oflag &= ~ONOCR;
 	tty.c_cc[VMIN] = 255; // should_block ? 1 : 0;
 	tty.c_cc[VTIME] = 1; // 0.1s read timeout
 
@@ -115,6 +121,8 @@ int set_interface_attribs(int fd, int speed, int parity, int should_block)
 	tty.c_cflag |= parity;
 	tty.c_cflag &= ~CSTOPB;
 	tty.c_cflag &= ~CRTSCTS;
+
+	cfmakeraw(&tty);
 
 	if(tcsetattr(fd, TCSANOW, &tty) != 0)
 	{
@@ -130,6 +138,12 @@ int wr(int fd, const char* buf)
 	while(buf[len] != 0) len++;
 	if(len == 0) return 0;
 	write(fd, buf, len);
+	return len;
+}
+
+void uart_flush()
+{
+	tcflush(fd, TCIOFLUSH);
 }
 
 void uart_send_packet(data_t* packet)
@@ -137,25 +151,39 @@ void uart_send_packet(data_t* packet)
 	insert_crc(packet);
 	uint8_t buf[4] = {packet->a,packet->b,packet->c,packet->d};
 	write(fd, buf, 4);
-	printf("Sent %02x %02x %02x %02x\n", buf[0], buf[1], buf[2], buf[3]);
+//	printf("Sent %02x %02x %02x %02x\n", buf[0], buf[1], buf[2], buf[3]);
 }
 
-int uart_read_packet(data_t* packet)
+#define INTERBYTE_TIMEOUT_MS 100
+
+int uart_read_packet(data_t* packet, int timeout)
 {
 	uint8_t buf[4];
+	int interbyte_timeout = INTERBYTE_TIMEOUT_MS;
 	int rcv_cnt = 0;
 	while(rcv_cnt < 4)
 	{
+		usleep(1000);
 		rcv_cnt += read(fd, &(buf[rcv_cnt]), 4-rcv_cnt);
+		if(timeout)
+			timeout--;
+		if(timeout == 1)
+			return 1;
+
+		interbyte_timeout--;
+		if(interbyte_timeout == 0)
+			return 2;
 	}
 	packet->a = buf[0];
 	packet->b = buf[1];
 	packet->c = buf[2];
 	packet->d = buf[3];
-	printf("Rcvd %02x %02x %02x %02x\n", buf[0], buf[1], buf[2], buf[3]);
+//	printf("Rcvd %02x %02x %02x %02x\n", buf[0], buf[1], buf[2], buf[3]);
 	if(check_crc_error(packet))
+	{
 		printf("WARN: CRC error in packet %02x %02x %02x %02x\n", buf[0], buf[1], buf[2], buf[3]);
-
+		return 3;
+	}
 	return 0;
 }
 
@@ -174,6 +202,7 @@ int uart_read_packet(data_t* packet)
 
 #define CMD_ENABLE_EEPROM 0xb1
 #define CMD_WRITE_EEPROM  0xb2
+#define CMD_RELOAD_SHADOW 0xb4
 #define CMD_SELFCHECK     0xb6
 
 #define REPLY_OP_SUCCESS  0x00
@@ -190,6 +219,8 @@ int uart_read_packet(data_t* packet)
 
 #define MAX_NODES 255
 
+#define RX_WAIT_TIMEOUT_MS 3000
+
 int node_selfcheck(int node)
 {
 	if(node < 1 || node > 254 || node > num_nodes)
@@ -202,10 +233,16 @@ int node_selfcheck(int node)
 	cmd.a = node;
 	cmd.b = CMD_SELFCHECK;
 	cmd.c = 0;
+	uart_flush();
 	uart_send_packet(&cmd);
 
 	data_t reply;
-	uart_read_packet(&reply);
+	int ret;
+	if((ret = uart_read_packet(&reply, RX_WAIT_TIMEOUT_MS)))
+	{
+		printf("node_selfcheck: uart_read_packet returned %u\n", ret);
+		return -3;
+	}
 
 	if(reply.a == node && reply.b == REPLY_SELFCHECK_STATUS)
 	{
@@ -218,6 +255,39 @@ int node_selfcheck(int node)
 	printf("node_selfcheck: Got unexpected data %02x %02x %02x %02x\n", reply.a, reply.b, reply.c, reply.d);
 	return -2;
 }
+
+int node_reload_shadow(int node)
+{
+	if(node < 1 || node > 254 || node > num_nodes)
+	{
+		printf("node_reload_shadow: invalid node number\n");
+		return -1;
+	}
+
+	data_t cmd;
+	cmd.a = node;
+	cmd.b = CMD_RELOAD_SHADOW;
+	cmd.c = 0;
+	uart_flush();
+	uart_send_packet(&cmd);
+
+	data_t reply;
+	int ret;
+	if((ret = uart_read_packet(&reply, RX_WAIT_TIMEOUT_MS)))
+	{
+		printf("node_reload_shadow: uart_read_packet returned %u\n", ret);
+		return -3;
+	}
+
+	if(reply.a != node || reply.b != REPLY_OP_SUCCESS || reply.c != CMD_RELOAD_SHADOW)
+	{
+		printf("node_reload_shadow: Got unexpected data %02x %02x %02x %02x\n", reply.a, reply.b, reply.c, reply.d);
+		return -2;
+	}
+
+	return 0;
+}
+
 
 int node_write_eeprom(int node, int addr, uint8_t data)
 {
@@ -242,10 +312,16 @@ int node_write_eeprom(int node, int addr, uint8_t data)
 
 	cmd.b = CMD_WRITE_EEPROM;
 	cmd.c = data;
+	uart_flush();
 	uart_send_packet(&cmd);
 
 	data_t reply;
-	uart_read_packet(&reply);
+	int ret;
+	if((ret = uart_read_packet(&reply, RX_WAIT_TIMEOUT_MS)))
+	{
+		printf("node_write_eeprom: uart_read_packet returned %u\n", ret);
+		return 4;
+	}
 	if(reply.a != node || reply.b != REPLY_OP_SUCCESS || reply.c != CMD_WRITE_EEPROM)
 	{
 		printf("node_write_eeprom: invalid reply: %02x %02x %02x %02x\n", reply.a, reply.b, reply.c, reply.d);
@@ -523,9 +599,25 @@ void saturate(int* val, int min, int max)
 	if(*val > max) *val = max;
 }
 
+
+double cels2bms(double celsius)
+{
+	return (celsius+273.15)*4.0;
+}
+
 void calculate_calibration(int n)
 {
-	printf("Calibration for node %u\n", n);
+	printf("Calibration for node %u\n", n+1);
+	for(int t = 0; t < 3; t++)
+	{
+		for(int v = 0; v < 3; v++)
+		{
+			printf("(T%5.1f V%5.3f -> T%4u V%4u) ", cal[n][t][v].t_act, cal[n][t][v].v_act,
+				cal[n][t][v].raw[T_MUX], cal[n][t][v].raw[V_MUX]);
+		}
+		printf("\n");
+	}
+
 	double gain[3];
 	gain[1] = (double)(cal[n][1][2].v_act - cal[n][1][0].v_act) /
 		(double)(cal[n][1][2].raw[V_MUX] - cal[n][1][0].raw[V_MUX]);
@@ -549,14 +641,21 @@ void calculate_calibration(int n)
 	gain[2] = (double)(cal[n][2][2].v_act - cal[n][2][0].v_act) /
 		(double)(cal[n][2][2].raw[V_MUX] - cal[n][2][0].raw[V_MUX]);
 
-	double t_coeff = (gain[2] - gain[0]) / (double)(cal[n][2][1].t_act - cal[n][0][1].t_act);
+	double t_coeffs[3];
 
-	printf("V pre-shift: gain = %lf %lf %lf  ofs = %lf  t_coeff = %lf\n", gain[0], gain[1], gain[2], ofs, t_coeff);
-	gain[1] *= 16384.0*500.0;
-	gain[0] *= 16384.0*500.0;
-	gain[2] *= 16384.0*500.0;
-	t_coeff *= 16384.0*500.0*8.0;
-	printf("V post-shift: gain = %lf %lf %lf ofs = %lf  t_coeff = %lf\n", gain[0], gain[1], gain[2], ofs, t_coeff);
+	for(int i = 0; i < 3; i++)
+		t_coeffs[i] = 256.0*((double)(cal[n][0][i].raw[V_MUX] - cal[n][2][i].raw[V_MUX]) /
+			(double)(cels2bms(cal[n][0][i].t_act) - cels2bms(cal[n][2][i].t_act)));
+
+
+//	printf("V pre-shift: gain = %lf %lf %lf  ofs = %lf  t_coeff = %lf\n", gain[0], gain[1], gain[2], ofs, t_coeff);
+	for(int i = 0; i < 3; i++)
+	{
+		gain[i] *= 16384.0*500.0;
+	}
+	printf("V post-shift: gains = %lf %lf %lf ofs = %lf  t_coeffs = %lf %lf %lf\n", gain[0], gain[1], gain[2], ofs, t_coeffs[0], t_coeffs[1], t_coeffs[2]);
+
+	float t_coeff = (t_coeffs[0]+t_coeffs[1]+t_coeffs[2])/3;
 
 	nodes[n].offset[V_MUX] = (int)((ofs<0.0)?(ofs-0.5):(ofs+0.5));
 	nodes[n].gain[V_MUX] = (int)(gain[1]+0.5);
@@ -572,16 +671,16 @@ void calculate_calibration(int n)
 
 	// Do temperatures.
 	double t_gain =
-		(double)(cal[n][2][1].t_act - cal[n][0][1].t_act) /
+		(double)(cels2bms(cal[n][2][1].t_act) - cels2bms(cal[n][0][1].t_act)) /
 		(double)(cal[n][2][1].raw[T_MUX] - cal[n][0][1].raw[T_MUX]);
 
 	double t_ofs1 =
-		(cal[n][0][1].t_act * (double)(cal[n][0][1].raw[T_MUX] - cal[n][2][1].raw[T_MUX])) /
-		((double)(cal[n][2][1].t_act - cal[n][0][1].t_act)) + cal[n][0][1].raw[T_MUX];
+		(cels2bms(cal[n][0][1].t_act) * (double)(cal[n][0][1].raw[T_MUX] - cal[n][2][1].raw[T_MUX])) /
+		((double)(cels2bms(cal[n][2][1].t_act) - cels2bms(cal[n][0][1].t_act))) + cal[n][0][1].raw[T_MUX];
 
 	double t_ofs2 =
-		(cal[n][2][1].t_act * (double)(cal[n][0][1].raw[T_MUX] - cal[n][2][1].raw[T_MUX])) /
-		((double)(cal[n][2][1].t_act - cal[n][0][1].t_act)) + cal[n][2][1].raw[T_MUX];
+		(cels2bms(cal[n][2][1].t_act) * (double)(cal[n][0][1].raw[T_MUX] - cal[n][2][1].raw[T_MUX])) /
+		((double)(cels2bms(cal[n][2][1].t_act) - cels2bms(cal[n][0][1].t_act))) + cal[n][2][1].raw[T_MUX];
 
 	if(fabs(t_ofs1-t_ofs2) > 1.0)
 		printf("T warning: |T_OFS1-T_OFS2| > 1.0 (T_OFS1=%lf, T_OFS2=%lf, diff=%lf)\n", t_ofs1, t_ofs2, fabs(t_ofs1-t_ofs2));
@@ -624,6 +723,7 @@ int get_values(int id, int get_t, int calibrated)
 
 	packet.c = 0;
 
+	uart_flush();
 	// First long request (start measuring)
 	uart_send_packet(&packet);
 
@@ -631,7 +731,12 @@ int get_values(int id, int get_t, int calibrated)
 	while(1)
 	{
 		data_t reply;
-		uart_read_packet(&reply);
+		int ret;
+		if((ret = uart_read_packet(&reply, RX_WAIT_TIMEOUT_MS)))
+		{
+			printf("get_values: uart_read_packet returned %u\n", ret);
+			return -1;
+		}
 		num_replies++;
 		if(reply.abcd == packet.abcd)
 			break;
@@ -652,12 +757,18 @@ int get_values(int id, int get_t, int calibrated)
 	usleep(500000);
 
 	// Get the results:
+	uart_flush();
 	uart_send_packet(&packet);
 
 	while(1)
 	{
 		data_t reply;
-		uart_read_packet(&reply);
+		int ret;
+		if((ret = uart_read_packet(&reply, RX_WAIT_TIMEOUT_MS)))
+		{
+			printf("get_values: uart_read_packet returned %u\n", ret);
+			return -2;
+		}
 		if(reply.abcd == packet.abcd)
 			break;
 		else if((reply.a > num_nodes) || ((reply.b&0b11000000) != 0b01000000))
@@ -678,10 +789,8 @@ int get_values(int id, int get_t, int calibrated)
 				if(get_t)
 				{
 					nodes[reply.a-1].raw[T_MUX] = val;
-					if(calibrated)
-						nodes[reply.a-1].t = (double)val-273.15;
-					else
-						nodes[reply.a-1].t = (double)(val>>2)-273.15;
+					// calibrated or non-calibrated, same formula
+					nodes[reply.a-1].t = ((double)val)/4.0-273.15;
 				}
 				else
 				{
@@ -706,10 +815,29 @@ int get_values(int id, int get_t, int calibrated)
 	return fail_cnt;
 }
 
+#define GET_VALUES_RETRIES 5
+
+int get_values_retry(int id, int get_t, int calibrated)
+{
+	int retries = 0;
+	while(get_values(id, get_t, calibrated))
+	{
+		if(retries == GET_VALUES_RETRIES)
+		{
+			printf("ERR: get_values failed too many times.\n");
+			return 1;
+		}
+		retries++;
+		printf("WARN: get_values failed, retry %u...\n", retries);
+		sleep(1);
+	}
+	return 0;
+}
+
 #define HIBYTE(x) (((x)&0xff00)>>8)
 #define LOBYTE(x) ((x)&0xff)
 
-int send_calibration(int n, int v, int t)
+int send_calibration(int n, int v, int t, int copy)
 {
 	int fail = 0;
 	if(v)
@@ -718,6 +846,15 @@ int send_calibration(int n, int v, int t)
 		fail += node_write_eeprom(n+1, 0x22, HIBYTE(nodes[n].offset[V_MUX]));
 		fail += node_write_eeprom(n+1, 0x27, LOBYTE(nodes[n].gain[V_MUX]));
 		fail += node_write_eeprom(n+1, 0x28, HIBYTE(nodes[n].gain[V_MUX]));
+
+		if(copy)
+		{
+			fail += node_write_eeprom(n+1, 0x41, LOBYTE(nodes[n].offset[V_MUX]));
+			fail += node_write_eeprom(n+1, 0x42, HIBYTE(nodes[n].offset[V_MUX]));
+			fail += node_write_eeprom(n+1, 0x47, LOBYTE(nodes[n].gain[V_MUX]));
+			fail += node_write_eeprom(n+1, 0x48, HIBYTE(nodes[n].gain[V_MUX]));
+
+		}
 	}
 	if(t)
 	{
@@ -726,10 +863,24 @@ int send_calibration(int n, int v, int t)
 		fail += node_write_eeprom(n+1, 0x2b, LOBYTE(nodes[n].gain[T_MUX]));
 		fail += node_write_eeprom(n+1, 0x2c, HIBYTE(nodes[n].gain[T_MUX]));
 		fail += node_write_eeprom(n+1, 0x2f, 0);
+
+		if(copy)
+		{
+			fail += node_write_eeprom(n+1, 0x45, LOBYTE(nodes[n].offset[T_MUX]));
+			fail += node_write_eeprom(n+1, 0x46, HIBYTE(nodes[n].offset[T_MUX]));
+			fail += node_write_eeprom(n+1, 0x4b, LOBYTE(nodes[n].gain[T_MUX]));
+			fail += node_write_eeprom(n+1, 0x4c, HIBYTE(nodes[n].gain[T_MUX]));
+			fail += node_write_eeprom(n+1, 0x4f, 0);
+		}
 	}
 	if(v&&t)
 	{
 		fail += node_write_eeprom(n+1, 0x2d, nodes[n].t_coeff[V_MUX]);
+
+		if(copy)
+		{
+			fail += node_write_eeprom(n+1, 0x4d, nodes[n].t_coeff[V_MUX]);
+		}
 	}
 	return fail;
 }
@@ -803,7 +954,7 @@ void calibration()
 		}
 		else if(key >= '1' && key <= '9')
 		{
-			if(get_values(255, 0, 0) || get_values(255, 1, 0))
+			if(get_values_retry(255, 0, 0) || get_values_retry(255, 1, 0))
 			{
 				printf("Error getting values.\n");
 			}
@@ -872,7 +1023,7 @@ void calibration()
 
 			for(int n = 0; n < num_nodes; n++)
 			{
-				if(send_calibration(n, (key=='v')||(key=='s'), (key=='t')||(key=='s')))
+				if(send_calibration(n, (key=='v')||(key=='s'), (key=='t')||(key=='s'), 1))
 				{
 					printf("Error sending data to node %u\n", n+1);
 				}
@@ -927,6 +1078,7 @@ int psu_clear_err()
 	{
 		wr(psu_fd, "SYST:ERR?\r\n");
 		buf[0] = 0; buf[1] = 0;
+		usleep(100000);
 		int kak = read(psu_fd, buf, 1000);
 		buf[kak] = 0;
 		if(buf[0] == '0' || buf[1] == '0')
@@ -1000,7 +1152,7 @@ int replace_strchr(char* str, char from, char to)
 	return n;
 }
 
-void sequence_nodes(int start_addr)
+int sequence_nodes(int start_addr)
 {
 	data_t packet;
 	packet.a= BROADCAST_ADDR;
@@ -1009,12 +1161,19 @@ void sequence_nodes(int start_addr)
 
 
 	num_nodes = 0;
+	uart_flush();
+
 	uart_send_packet(&packet);
 
 	for(int i = 0; i < MAX_NODES*2; i++)
 	{
 		data_t reply;
-		uart_read_packet(&reply);
+		int ret;
+		if((ret = uart_read_packet(&reply, RX_WAIT_TIMEOUT_MS)))
+		{
+			printf("sequence_nodes: uart_read_packet returned %u\n", ret);
+			return 1;
+		}
 		if(reply.a == packet.a && reply.b == packet.b)
 		{
 			break;
@@ -1034,7 +1193,7 @@ void sequence_nodes(int start_addr)
 	}
 
 	printf("Found %u nodes.\n", num_nodes);
-
+	return 0;
 
 }
 
@@ -1137,7 +1296,7 @@ void auto_calibration(int load_from_file)
 				if((fabs(tavg - tset) < 0.5) && p_stable && tdiff < 0.4)
 					stable_cnt++;
 
-				if(stable_cnt > 2) // todo: 240
+				if(stable_cnt > 10)
 				{
 					printf("\nOven stable, measuring nodes...\n");
 					actual_t = tavg;
@@ -1150,7 +1309,8 @@ void auto_calibration(int load_from_file)
 
 		for(int v_cnt = 0; v_cnt < 3; v_cnt++)
 		{
-			printf("Measuring at %f V.\n", voltage_cmds[v_cnt]);
+			printf("Measuring at %.3f V ", voltage_cmds[v_cnt]);
+			fflush(stdout);
 			psu_clear_err();
 			sleep(1);
 			sprintf(buf, "VOLT %f\r\n", voltage_cmds[v_cnt]);
@@ -1158,10 +1318,23 @@ void auto_calibration(int load_from_file)
 			wr(psu_fd, "OUTP ON\r\n");
 			sleep(5);
 			wr(psu_fd, "MEAS:VOLT?\r\n");
-			buf[read(psu_fd, buf, 1000)] = 0;
-			double actual_v = atof(buf);
+			usleep(100000);
+			int loc = read_until_nl_timeout(psu_fd, buf, 1000, 5000);
+			if(loc == -1)
+			{
+				printf("\nERROR: PSU data fetch timeouted.\n");
+			}
+			else if(loc == 0)
+			{
+				printf("\nERROR: PSU buffer full without newline.\n");
+			}
 
-			if(get_values(255, 0, 0) || get_values(255, 1, 0))
+			double actual_v = atof(buf);
+			printf("(actual: %.3f V)\n", actual_v);
+			if(actual_v < voltage_cmds[v_cnt]-0.05 || actual_v > voltage_cmds[v_cnt]+0.05)
+				printf("WARN: Measured voltage (%f) out of spec.\n", actual_v);
+
+			if(get_values_retry(255, 0, 0) || get_values_retry(255, 1, 0))
 			{
 				printf("Error getting values from nodes.\n");
 			}
@@ -1245,9 +1418,9 @@ void auto_calibration(int load_from_file)
 	printf("T gain:    min=%6d   avg=%7.1f   max=%6d\n", min_gain[T_MUX], avg_gain[T_MUX], max_gain[T_MUX]);
 
 	const int do_check[3] = {1, 0, 1};
-	const int offset_max_diff[3]  = {100, 0, 50};
+	const int offset_max_diff[3]  = {150, 0, 50};
 	const int gain_max_diff[3]    = {1000, 0, 1000};
-	const int t_coeff_max_diff[3] = {20, 0, 20};
+	const int t_coeff_max_diff[3] = {40, 0, 40};
 
 	for(int n = 0; n < num_nodes; n++)
 	{
@@ -1300,16 +1473,20 @@ void auto_calibration(int load_from_file)
 		printf("Sending calibration to nodes...\n");
 		for(int n = 0; n < num_nodes; n++)
 		{
-			if(send_calibration(n, (key=='a')||(key=='v'), (key=='a')||(key=='t')))
+			if(send_calibration(n, (key=='a')||(key=='v'), (key=='a')||(key=='t'), 1))
 				printf("WARN: Error sending to node %u", n+1);
 		}
 
-		printf("Self-checking nodes...\n");
+		printf("Self-checking nodes & reloading calibration...\n");
 		for(int n = 0; n < num_nodes; n++)
 		{
 			if(node_selfcheck(n+1))
 			{
 				printf("WARN: Node %u self-check failed!\n", n+1);
+			}
+			if(node_reload_shadow(n+1))
+			{
+				printf("WARN: Node %u shadow reload failed!\n", n+1);
 			}
 		}
 	}
@@ -1392,8 +1569,6 @@ void input_packet(data_t* packet)
 
 int main(int argc, char** argv)
 {
-	char buf[5000];
-
 	if(argc < 2)
 	{
 		printf("Usage: calibrate <bms_serial_device> <q | r | c[a|o] | s[c|r]> [power_supply_device] [oven_device]\n");
@@ -1449,6 +1624,7 @@ int main(int argc, char** argv)
 
 			printf("Press any key to stop waiting for replies.");
 			fflush(stdout);
+			uart_flush();
 			uart_send_packet(&packet);
 
 			int num_repl = 0;
@@ -1464,7 +1640,7 @@ int main(int argc, char** argv)
 				ioctl(fd, FIONREAD, &bytes_avail);
 				if(bytes_avail > 3)
 				{
-					uart_read_packet(&(replies[num_repl]));
+					uart_read_packet(&(replies[num_repl]), 0);
 					num_repl++;
 				}
 			}
@@ -1477,6 +1653,7 @@ int main(int argc, char** argv)
 					replies[i].a, replies[i].b, replies[i].c);
 				parse_message(&(replies[i]));
 			}
+			uart_flush();
 			__fpurge(stdin);
 
 		}
@@ -1523,23 +1700,18 @@ int main(int argc, char** argv)
 	else if(argc > 2 && argv[2][0] == 's') // Show
 	{
 		int calibrated = 0;
-		int raw = 0;
 		if(argv[2][1] == 'c')
 			calibrated = 1;
-		else if(argv[2][1] == 'r')
-			raw = 1;
 		sequence_nodes(1);
 		while(1)
 		{
-			get_values(255, 1, calibrated);
-			get_values(255, 0, calibrated);
+			get_values_retry(255, 1, calibrated);
+			get_values_retry(255, 0, calibrated);
 
 			for(int i = 0; i < num_nodes; i++)
 			{
-				if(raw)
-					printf("(%02u:T=%04u, V=%04u)\n", i+1, nodes[i].raw[T_MUX], nodes[i].raw[V_MUX]);
-				else
-					printf("(%02u:T=%4.3f, V=%5.4f)\n", i+1, nodes[i].t+273.15, nodes[i].v);
+					printf("(%02u:T=%4.3f, V=%5.4f)  ", i+1, nodes[i].t, nodes[i].v);
+					printf("(DATA:T=%04u, V=%04u)\n", nodes[i].raw[T_MUX], nodes[i].raw[V_MUX]);
 			}
 
 			printf("\n");

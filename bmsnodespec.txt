@@ -37,6 +37,9 @@ voltages/etc. with minimum effort without interrupting nodes with incoming data 
 
 - Operations are guaranteed to take a predefined, constant amount of clock cycles (or very nearly so).
  Note that actual times may differ a little due to the difference in internal RC oscillator frequency.
+
+- Nodes include full calibration code with two-point (gain & offset) calibration for both
+temperature and voltage, and a voltage-temperature coefficient. This calibration can be skipped.
   
 
  31 30 29 28 27 26 25 24 23 22 21 20 19 18 17 16 15 14 13 12 11 10  9  8  7  6  5  4  3  2  1  0
@@ -67,7 +70,7 @@ Command(*1)         Description                       Data byte
 0x80- 0b100abcde  Measure & Report                    Power consumption leveling(*2) 
  0x9f         ^^--de: 00 voltage 01 ext sens 10 int temp 11 ext sens w/ PU resistor
              ^----c: Vref 0 = Vcc (ext sens), 1 = 1.1V (volt, int temp)
-            ^-----b: Use offset calibration stored in EEPROM
+            ^-----b: Calibrate result
            ^------a: Long measurement:
                      - First reports the result of PREVIOUS such operation
                      - Then relays the message, if broadcast address
@@ -84,8 +87,8 @@ Command(*1)         Description                       Data byte
 0xb0  0b10110000  Change node ID                      New ID (*3)
 0xb1  0b10110001  Enable EEPROM write access          EEPROM address for next write operation (does not reply)
 0xb2  0b10110010  Write EEPROM byte                   Data byte (replies OP OK or OP not allowed)
-0xb3  0b10110011  Set state                           Bit 0: BOD disable(*4) (0=don't disable(default), 1=disable)
-                                                      Bit 1: Debug mode(*5)  (0=off(default), 1=on)
+0xb3  0b10110011  Set state                           Bit 0: Reserved (was BOD disable mode, may be implemented in future.*4)
+                                                      Bit 1: Debug/"Visual" mode(*5)  (0=off(default), 1=on)
 
 0xb4  0b10110100  Reload variables from EEPROM
                     - Calibration offsets
@@ -106,14 +109,14 @@ rest Reserved for future use
     decrements the data byte, so that all nodes end up using approx. the same power for the measurement round.
 *3) The field is incremented by the node when used as a broadcast message, enabling automatic sequencing of the nodes.
 *4) Brown-out detector can be disabled to really minimize current consumption (from ~20 uA to ~1 uA).
-    Defaults to not disabled state in boot.
+    Defaults to not disabled state in boot. BOD disable NOT IMPLEMENTED currently.
 *5) Debug mode blinks LED in data transactions etc. Nice demo.
 
 ----------------
 Node replies:
 ----------------
 
-- Measurement result (10-bit data)
+- Measurement result (12-bit data)
 - EEPROM data (8-bit data)
 - Operation success (8-bit data with the original command byte)
 - Operation error (8-bit error code)
@@ -134,8 +137,8 @@ Identifier(*1)         Description                       Data byte
 0x40- 0b01abcdef       Measurement data                  8 lowest bits of value
  0x7f       ^^^^-------cdef: 4 MSbits of value.
           ^^-----------ab: 00 voltage 01 ext sens 10 int temp 11 reserved
-     12-bit value is left-aligned. In normal measurement, two lowest bits are always zero.
-        Long measurement mode allows more resolution (by summing results of multiple measurements).
+     12-bit value is left-aligned. Short mode averages 4 10-bit readings to make the 12-bit value.
+        Long measurement averages 2048 values for reduced noise and aliasing.
         The ADC resolution is still 10 bits.
 
 

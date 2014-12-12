@@ -1,16 +1,3 @@
-//                76543210 76543210 76543210 76543210
-// Val: 0-4095                          XXXX XXXXXXXX
-// Gain: 0-65535                    XXXXXXXX XXXXXXXX
-// Val*Gain:          XXXX XXXXXXXX XXXXXXXX XXXXXXXX
-// Use:                 XX XXXXXXXX XX>>>>>> >>>>>>>>   >>14
-// Gain 16384 = 1.0
-// Max gain ~= 4.0 (3.9999)
-// Fixed shift of 14.
-// Gain = 16-bit.
-// Offset = 16-bit
-// Temp coeff = 8-bit
-
-
 // EEPROM MAP
 // 0x00-0x1f: Non-checksummed area
 // 0x00-0x0f: Boot counters, saturated at 255, indexed with MCUSR.
@@ -32,101 +19,9 @@
 // 0x30: Checksum of all previous (LSbyte of sum of bytes)
 
 // ...0x3e: Reserved for future use within node code
-
-
-// 0x40...0x7f: For free use by master.
-
-// Two-point calibration.
-/*
-
-    |                    /
-    |                  /
-RAW2|- - - - - - - - x
-    |              / |
-    |            /
-    |          /     |
-RAW1|- - - - x
-    |      / |       |
-    |    /
-    |  /     |       |
-OFS x/
-    |        |       |
-    --------------------------
-    0       V1      V2
-
-V2 = 4.100V (general) or 3.500V (LFP special)
-V1 = 2.900V (general)
-
-################################
-gain = (RAW2 - RAW1) / (V2 - V1)
-gain := 1/gain
-################################
-
-gain = (RAW1 - OFS) / (V1 - 0)
-gain = (RAW2 - OFS) / (V2 - 0)
-
-(RAW1 - OFS1) / (V1) = (RAW2 - RAW1) / (V2 - V1)
-RAW1 - OFS1 = V1(RAW2 - RAW1) / (V2 - V1)
--OFS1 = V1(RAW2 - RAW1) / (V2 - V1)  - RAW1
-OFS1 = -V1(RAW2 - RAW1) / (V2 - V1) + RAW1
-OFS1 = V1(RAW1 - RAW2) / (V2 - V1) + RAW1
-
-(RAW2 - OFS)2 / V2 = (RAW2 - RAW1) / (V2 - V1)
-RAW2 - OFS2 = V2(RAW2 - RAW1) / (V2 - V1)
--OFS2 = V2(RAW2 - RAW1) / (V2 - V1) - RAW2
-OFS2 = -V2(RAW2 - RAW1) / (V2 - V1) + RAW2
-OFS2 = V2(RAW1 - RAW2) / (V2 - V1) + RAW2
-
-###################
-OFS = (OFS1+OFS2)/2
-###################
-
-Applying correction
-
-Vcalibrated = (Vraw - OFS)*(gain + lastT*t_coeff)
-
-Basic gain 10-bit to millivolts/2: 9/4 = 2.25
-Basic gain 12-bit to millivolts/2: 9/16 = 0.5625
-
-T internal: 12-bit output = kelvins (9 LSbits used)
-V: 12-bit output = millivolts/2 (2000 means 4.000V)
-
-
-Ex.1
-Calibration points 3V, 4V
-Raw @ 3000mV = 320
-Raw @ 4000mV = 410
-gain = 1/ ((410 - 320) / 1000) = 11.1111
-OFS1 = 3000(-90) / 1000 + 320 = 50
-OFS2 = 4000(-90) / 1000 + 410 = 50
-OFS = 50
-Convert 320: 11.1111*(320 - 50) = 3000
-Convert 410: 11.1111*(410 - 50) = 4000
-Ex.2
-Raw @ 3000mV = 310
-Raw @ 4000mV = 420
-gain = 1/((420-310) / 1000)) = 9.090909
-OFS1 = 3000(-110) / 1000 + 310 = -20
-OFS2 = 4000(-110) / 1000 + 420 = -20
-OFS = -20
-Convert 310: 9.090909*(310 + 20) = 3000
-Convert 420: 9.090909*(420 + 20) = 4000
-
-Implementation:
-
-12-bit data in (0...4095)
--= offset: Directly an int8_t (-128..+127)
-
-gain (uint16_t): gain(uint16_t) + (temperature-temp_coeff_midpoint)(int8_t)*temp_coeff(int8_t)
-result = gain(uint16_t) * data(uint16_t with 12 bits) >> shift
-
-Typical values for voltage: gain = 9000, shift = 14
-
-
-
-
-*/
-
+// 0x41..0x4f: copy of factory-calibrated values 0x21..0x2f (for
+//             those users who mess up playing with calibration
+//             and want to revert to factory values)
 
 #define F_CPU 8000000UL
 
@@ -162,6 +57,7 @@ typedef union
 {
 	uint32_t both32;
 	struct { uint16_t lo16; uint16_t hi16; };
+	struct { int16_t slo16; int16_t shi16; };
 } union32_t;
 
 #define SHADOW_LEN 16
@@ -174,7 +70,7 @@ typedef union
 
 shadow_t shadow;
 
-int8_t last_temp_diff; // difference of latest chip temperature and temp coeff midpoint (+23 degC)
+int16_t last_temp_diff; // difference of latest chip temperature and temp coeff midpoint (+23 degC), in 1/4C
 
 #define LED_ON()  cbi(PORTB, 1)
 #define LED_OFF() sbi(PORTB, 1)
@@ -223,8 +119,6 @@ volatile uint8_t receiving = 0;
 #define INT_TEMP 2
 #define EXT_SENS_PU 3
 
-// Stack: about 34 bytes + 10 from functions = 44
-// Available srm for globals = about 80 bytes
 int main() __attribute__((noreturn));
 
 int main()
@@ -469,18 +363,18 @@ int main()
 
 					if(tmp_rcv_data_b & 0b00001000)
 					{	// Calibrate
-						// V: 0..4095
-						// val_accum guaranteed to fit in 16 bit here.
-						if(val_accum.lo16 > shadow.offsets[src])
-							val_accum.lo16 -= shadow.offsets[src];
+						// val_accum is 0..4092 (can be compared as int16_t)
+						int16_t offset = shadow.offsets[src];
+						int16_t temp_corr = (int16_t)shadow.t_coeffs[src] * (int16_t)last_temp_diff;
+						temp_corr >>= 8;
+						offset += temp_corr;
+
+						if(val_accum.slo16 > offset)
+							val_accum.slo16 -= offset;
 						else
 							val_accum.lo16 = 0;
 
 						uint16_t gain = shadow.gains[src].both;
-
-						int16_t temp_corr = (int16_t)shadow.t_coeffs[src] * (int16_t)last_temp_diff;
-						temp_corr >>= 3;
-						gain += temp_corr;
 
 						val_accum.both32 *= gain;
 						val_accum.both32 >>= 14;
@@ -495,7 +389,7 @@ int main()
 
 					if(src == INT_TEMP)
 					{	// Store chip temperature result for future corrections
-						last_temp_diff = (int16_t)val.both-273-23;
+						last_temp_diff = val_accum.slo16 - 273*4 - 23*4;
 					}
 
 					// Result is 0b01000000 | (src<<4) | val.hi&0x0f.
