@@ -112,8 +112,6 @@ int set_interface_attribs(int fd, int speed, int parity, int should_block)
 	tty.c_oflag &= ~OCRNL;
 	tty.c_oflag &= ~ONLRET;
 	tty.c_oflag &= ~ONOCR;
-	tty.c_cc[VMIN] = 255; // should_block ? 1 : 0;
-	tty.c_cc[VTIME] = 1; // 0.1s read timeout
 
 	tty.c_iflag &= ~(IXON | IXOFF | IXANY);
 	tty.c_cflag |= (CLOCAL | CREAD);
@@ -123,6 +121,9 @@ int set_interface_attribs(int fd, int speed, int parity, int should_block)
 	tty.c_cflag &= ~CRTSCTS;
 
 	cfmakeraw(&tty);
+
+	tty.c_cc[VMIN] = 0;
+	tty.c_cc[VTIME] = 1;
 
 	if(tcsetattr(fd, TCSANOW, &tty) != 0)
 	{
@@ -154,12 +155,12 @@ void uart_send_packet(data_t* packet)
 //	printf("Sent %02x %02x %02x %02x\n", buf[0], buf[1], buf[2], buf[3]);
 }
 
-#define INTERBYTE_TIMEOUT_MS 100
+#define INTERBYTE_TIMEOUT 2
 
 int uart_read_packet(data_t* packet, int timeout)
 {
 	uint8_t buf[4];
-	int interbyte_timeout = INTERBYTE_TIMEOUT_MS;
+	int interbyte_timeout = INTERBYTE_TIMEOUT;
 	int rcv_cnt = 0;
 	while(rcv_cnt < 4)
 	{
@@ -219,7 +220,7 @@ int uart_read_packet(data_t* packet, int timeout)
 
 #define MAX_NODES 255
 
-#define RX_WAIT_TIMEOUT_MS 3000
+#define RX_WAIT_TIMEOUT_MS 3
 
 int node_selfcheck(int node)
 {

@@ -48,6 +48,7 @@ uint8_t uart_read_byte_block(uint8_t* out, uint16_t timeout)
 		}
 		if(timeout)
 			timeout--;
+		_delay_us(0.3);
 		if(timeout == 1)
 		{
 			return 1;
@@ -77,7 +78,7 @@ uint8_t uart_read_byte_block(uint8_t* out, uint16_t timeout)
 	return 0;
 }
 
-#define TIMEOUT 10000
+#define TIMEOUT 50000
 
 int main()
 {
@@ -104,6 +105,17 @@ int main()
 		}
 
 		LED_ON();
+
+		if(err == 1)
+		{
+			for(uint8_t i = 0; i < 4; i++)
+			{
+				_delay_ms(100);
+				LED_OFF();
+				_delay_ms(100);
+				LED_ON();
+			}
+		}
 
 		if(err || check_crc(&packet))
 		{
