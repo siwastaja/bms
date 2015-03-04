@@ -1316,6 +1316,7 @@ void auto_calibration(int load_from_file)
 			sleep(1);
 			sprintf(buf, "VOLT %f\r\n", voltage_cmds[v_cnt]);
 			wr(psu_fd, buf);
+			usleep(100000);
 			wr(psu_fd, "OUTP ON\r\n");
 			sleep(5);
 			wr(psu_fd, "MEAS:VOLT?\r\n");
@@ -1475,10 +1476,18 @@ void auto_calibration(int load_from_file)
 		for(int n = 0; n < num_nodes; n++)
 		{
 			if(send_calibration(n, (key=='a')||(key=='v'), (key=='a')||(key=='t'), 1))
-				printf("WARN: Error sending to node %u", n+1);
+			{
+				printf("WARN: Error sending to node %u, trying again.\n", n+1);
+				sleep(2);
+				if(send_calibration(n, (key=='a')||(key=='v'), (key=='a')||(key=='t'), 1))
+				{
+					printf("Resend failed, giving up.\n");
+				}
+
+			}
 		}
 
-		printf("Self-checking nodes & reloading calibration...\n");
+		printf("Self-checking nodes & commanding calibration shadow memory reload...\n");
 		for(int n = 0; n < num_nodes; n++)
 		{
 			if(node_selfcheck(n+1))
