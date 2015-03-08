@@ -248,15 +248,15 @@ uint8_t handle_packet(data_t* packet)
 		return HANDLE_ILLEGAL_NODE;
 	if((packet->b & 0b11110000) == 0b01000000)
 	{
-		uint16_t vraw = ((uint16_t)(packet->b & 0b00001111) << 8) | packet->c;
-		nodes[node].v = ((uint32_t)v_raw*(VOLT_MULT)/(VOLT_DIV));
+		// From 12-bit 2mvs to 16-bit mvs.
+		nodes[node].v = (uint16_t)(((uint16_t)(packet->b & 0x0f) << 8) | packet->c) << 1;
 		nodes[node].v_last_valid_time = clock;
 	}
-	else if(packet->b & 0b11110000) == 0b0110)
+	else if(packet->b & 0b11110000) == 0b01100000)
 	{
-		uint16_t traw = ((uint16_t)(packet->b & 0b00001111) << 8) | packet->c;
+		uint16_t traw = ((uint16_t)(packet->b & 0x0f) << 8) | packet->c;
 		nodes[node].t = K2C(traw>>2); // 12-bit to 10-bit, 1 LSB = 1 deg C
-		nodes[node].v_last_valid_time = clock;
+		nodes[node].t_last_valid_time = clock;
 	}
 	else if(packet->b == 0x03)
 	{
@@ -319,8 +319,6 @@ void load_bal_eeprom()
 		}
 	}
 }
-
-
 
 uint16_t balancer_low_v_point = 3450;
 uint16_t balancer_high_v_point = 3570;
@@ -421,11 +419,11 @@ const char* config_texts[NUM_CONF_PARAMS] =
 "lvc_mv",
 "overtemp",
 "undertemp",
-"unclear_action_delay",
-"lvc_action_delay",
-"balancer_unit_seconds",
-"temperature_poll_rate",
-"pack_capacity_Ah",
+"unclear_delay",
+"lvc_delay",
+"balancer_unit_sec",
+"temp_poll_rate",
+"pack_Ah",
 "over_soc_shutdown",
 "timeout_per_node_ms",
 "shunt_limit",

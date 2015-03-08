@@ -117,7 +117,7 @@ int set_interface_attribs(int fd, int speed, int parity, int should_block)
 	tty.c_cflag |= (CLOCAL | CREAD);
 	tty.c_cflag &= ~(PARENB | PARODD);
 	tty.c_cflag |= parity;
-	tty.c_cflag &= ~CSTOPB;
+	tty.c_cflag |= CSTOPB;
 	tty.c_cflag &= ~CRTSCTS;
 
 	cfmakeraw(&tty);
@@ -155,7 +155,7 @@ void uart_send_packet(data_t* packet)
 //	printf("Sent %02x %02x %02x %02x\n", buf[0], buf[1], buf[2], buf[3]);
 }
 
-#define INTERBYTE_TIMEOUT 2
+#define INTERBYTE_TIMEOUT 3
 
 int uart_read_packet(data_t* packet, int timeout)
 {
@@ -220,7 +220,7 @@ int uart_read_packet(data_t* packet, int timeout)
 
 #define MAX_NODES 255
 
-#define RX_WAIT_TIMEOUT_MS 3
+#define RX_WAIT_TIMEOUT_100MS 15
 
 int node_selfcheck(int node)
 {
@@ -239,7 +239,7 @@ int node_selfcheck(int node)
 
 	data_t reply;
 	int ret;
-	if((ret = uart_read_packet(&reply, RX_WAIT_TIMEOUT_MS)))
+	if((ret = uart_read_packet(&reply, RX_WAIT_TIMEOUT_100MS)))
 	{
 		printf("node_selfcheck: uart_read_packet returned %u\n", ret);
 		return -3;
@@ -274,7 +274,7 @@ int node_reload_shadow(int node)
 
 	data_t reply;
 	int ret;
-	if((ret = uart_read_packet(&reply, RX_WAIT_TIMEOUT_MS)))
+	if((ret = uart_read_packet(&reply, RX_WAIT_TIMEOUT_100MS)))
 	{
 		printf("node_reload_shadow: uart_read_packet returned %u\n", ret);
 		return -3;
@@ -318,7 +318,7 @@ int node_write_eeprom(int node, int addr, uint8_t data)
 
 	data_t reply;
 	int ret;
-	if((ret = uart_read_packet(&reply, RX_WAIT_TIMEOUT_MS)))
+	if((ret = uart_read_packet(&reply, RX_WAIT_TIMEOUT_100MS)))
 	{
 		printf("node_write_eeprom: uart_read_packet returned %u\n", ret);
 		return 4;
@@ -704,8 +704,9 @@ void calculate_calibration(int n)
 
 }
 
-int get_values(int id, int get_t, int calibrated)
+int get_values(int id, int get_t, int calibrated, int long_acq)
 {
+	int num_replies;
 	int fail_cnt = 0;
 
 	if(id < 0 || id > 255)
@@ -715,61 +716,69 @@ int get_values(int id, int get_t, int calibrated)
 
 	data_t packet;
 	packet.a = id;
+	packet.b = CMD_MEASURE | CMD_MEASURE_REF_1V1;
+	if(long_acq)
+		packet.b |= CMD_MEASURE_LONG;
 	if(get_t)
-		packet.b = CMD_MEASURE | CMD_MEASURE_INT_T | CMD_MEASURE_REF_1V1 | CMD_MEASURE_LONG;
+		packet.b |= CMD_MEASURE_INT_T;
 	else
-		packet.b = CMD_MEASURE | CMD_MEASURE_V | CMD_MEASURE_REF_1V1 | CMD_MEASURE_LONG;
+		packet.b |= CMD_MEASURE_V;
 
 	if(calibrated) packet.b |= CMD_MEASURE_CALIB;
 
 	packet.c = 0;
 
-	uart_flush();
-	// First long request (start measuring)
-	uart_send_packet(&packet);
-
-	int num_replies = 0;
-	while(1)
+	if(long_acq)
 	{
-		data_t reply;
-		int ret;
-		if((ret = uart_read_packet(&reply, RX_WAIT_TIMEOUT_MS)))
+		uart_flush();
+		// First long request (start measuring)
+		uart_send_packet(&packet);
+
+		num_replies = 0;
+		while(1)
 		{
-			printf("get_values: uart_read_packet returned %u\n", ret);
-			return -1;
+			data_t reply;
+			int ret;
+			if((ret = uart_read_packet(&reply, RX_WAIT_TIMEOUT_100MS)))
+			{
+				printf("get_values: uart_read_packet returned %u\n", ret);
+				return -1;
+			}
+			num_replies++;
+			if(reply.abcd == packet.abcd)
+				break;
+			else if((reply.a > num_nodes) || (((reply.b&0b11000000) != 0b01000000) && ((reply.b&0b11000000) != 0)))
+			{
+				printf("Warning: Ignoring unexpected packet %x %x %x %x\n", reply.a, reply.b, reply.c, reply.d);
+				fail_cnt++;
+			}
 		}
-		num_replies++;
-		if(reply.abcd == packet.abcd)
-			break;
-		else if((reply.a > num_nodes) || (((reply.b&0b11000000) != 0b01000000) && ((reply.b&0b11000000) != 0)))
+
+		if(num_replies != expected_replies)
 		{
-			printf("Warning: Ignoring unexpected packet %x %x %x %x\n", reply.a, reply.b, reply.c, reply.d);
+			printf("Warning: expected %u messages, got %u\n", expected_replies, num_replies);
 			fail_cnt++;
 		}
-	}
 
-	if(num_replies != expected_replies)
-	{
-		printf("Warning: expected %u messages, got %u\n", expected_replies, num_replies);
-		fail_cnt++;
+		// Wait for at least 300 ms
+		usleep(500000);
 	}
-
-	// Wait for at least 300 ms
-	usleep(500000);
 
 	// Get the results:
 	uart_flush();
 	uart_send_packet(&packet);
 
+	num_replies = 0;
 	while(1)
 	{
 		data_t reply;
 		int ret;
-		if((ret = uart_read_packet(&reply, RX_WAIT_TIMEOUT_MS)))
+		if((ret = uart_read_packet(&reply, RX_WAIT_TIMEOUT_100MS)))
 		{
 			printf("get_values: uart_read_packet returned %u\n", ret);
 			return -2;
 		}
+		num_replies++;
 		if(reply.abcd == packet.abcd)
 			break;
 		else if((reply.a > num_nodes) || ((reply.b&0b11000000) != 0b01000000))
@@ -811,17 +820,17 @@ int get_values(int id, int get_t, int calibrated)
 		fail_cnt++;
 	}
 
-	usleep(500000);
+	usleep(long_acq?500000:50000);
 
 	return fail_cnt;
 }
 
 #define GET_VALUES_RETRIES 5
 
-int get_values_retry(int id, int get_t, int calibrated)
+int get_values_retry(int id, int get_t, int calibrated, int long_acq)
 {
 	int retries = 0;
-	while(get_values(id, get_t, calibrated))
+	while(get_values(id, get_t, calibrated, long_acq))
 	{
 		if(retries == GET_VALUES_RETRIES)
 		{
@@ -955,7 +964,7 @@ void calibration()
 		}
 		else if(key >= '1' && key <= '9')
 		{
-			if(get_values_retry(255, 0, 0) || get_values_retry(255, 1, 0))
+			if(get_values_retry(255, 0, 0, 1) || get_values_retry(255, 1, 0, 1))
 			{
 				printf("Error getting values.\n");
 			}
@@ -1170,7 +1179,7 @@ int sequence_nodes(int start_addr)
 	{
 		data_t reply;
 		int ret;
-		if((ret = uart_read_packet(&reply, RX_WAIT_TIMEOUT_MS)))
+		if((ret = uart_read_packet(&reply, RX_WAIT_TIMEOUT_100MS)))
 		{
 			printf("sequence_nodes: uart_read_packet returned %u\n", ret);
 			return 1;
@@ -1336,7 +1345,7 @@ void auto_calibration(int load_from_file)
 			if(actual_v < voltage_cmds[v_cnt]-0.05 || actual_v > voltage_cmds[v_cnt]+0.05)
 				printf("WARN: Measured voltage (%f) out of spec.\n", actual_v);
 
-			if(get_values_retry(255, 0, 0) || get_values_retry(255, 1, 0))
+			if(get_values_retry(255, 0, 0, 1) || get_values_retry(255, 1, 0, 1))
 			{
 				printf("Error getting values from nodes.\n");
 			}
@@ -1710,13 +1719,16 @@ int main(int argc, char** argv)
 	else if(argc > 2 && argv[2][0] == 's') // Show
 	{
 		int calibrated = 0;
-		if(argv[2][1] == 'c')
+		int long_acq = 0;
+		if(strchr(argv[2], 'c'))
 			calibrated = 1;
+		if(strchr(argv[2], 'l'))
+			long_acq = 1;
 		sequence_nodes(1);
 		while(1)
 		{
-			get_values_retry(255, 1, calibrated);
-			get_values_retry(255, 0, calibrated);
+			get_values_retry(255, 1, calibrated, long_acq);
+			get_values_retry(255, 0, calibrated, long_acq);
 
 			for(int i = 0; i < num_nodes; i++)
 			{
@@ -1726,7 +1738,8 @@ int main(int argc, char** argv)
 
 			printf("\n");
 
-			sleep(1);
+//			sleep(1);
+			usleep(50000);
 			if(kbhit())
 			{
 				__fpurge(stdin);
