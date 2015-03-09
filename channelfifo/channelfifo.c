@@ -10,34 +10,36 @@
 
 #include "../common/manchester.h"
 
-// DATA IN             : pin 2 (PB3 PCINT3)
+// MANCHESTER DATA IN  : pin 2 (PB3 PCINT3)
 // DATA OUT            : pin 6 (PB1)
-// DATA READ IN        : pin 5 (PB0)
-// INT / CLOCK         : pin 7 (PB2)
+// READ CMD IN         : pin 5 (PB0)
+// INTERRUPT / CLOCK   : pin 7 (PB2)
 
-// Packet reveiced
-// INT/CLOCK outputs high.
-// Master sets data read = 1, disables all interrupts, is ready to read data,
-//            keeps data read high until receives clock pulse
+// Packet reveiced ->
+// INT/CLOCK outputs high, interrupting master cpu.
+// When ready to read, master disables any interrupts, sets data read = 1
+//            keeps data read high at least until receives the first clock pulse
 // Clock out starts at 1. Every falling edge denotes a new bit.
 // 32 bits of data.
 // If a new packet is received during this, clocking of the data ceases temporarily. Master must wait.
+// The BMS architecture guarantees that at least for every packet (2 ms), there is equal pause (2 ms),
+// so the FIFO->master communication cannot be starved due to incoming traffic, only slowed down.
 
 
-#define STAT_RX_ERR      1
-#define STAT_OVERRUN     2
-#define STAT_ALMOST_FULL 4
+//#define STAT_RX_ERR      1
+//#define STAT_OVERRUN     2
+//#define STAT_ALMOST_FULL 4
 
-#define FIFO_SLOTS 8
+#define FIFO_SLOTS 16
 
-uint8_t status;
+//uint8_t status;
 data_t fifo[FIFO_SLOTS];
 
-uint8_t fifo_wr_idx = 0;
-uint8_t fifo_rd_idx = 0; // 0 .. FIFO_SLOTS-1
-uint8_t fifo_rd_bit_idx = 0; // 0 ..31
+uint8_t fifo_wr_idx;
+uint8_t fifo_rd_idx; // 0 .. FIFO_SLOTS-1
+uint32_t fifo_rd_bit_mask = 1;
 
-uint8_t overrun_cnt = 0;
+//uint8_t overrun_cnt;
 
 // Function takes some time; is used right after packet is received;
 // No new packet is expected during the push.
@@ -48,7 +50,7 @@ void fifo_push(data_t* element)
 	if(((fifo_wr_idx < FIFO_SLOTS-1) && (fifo_wr_idx+1 == fifo_rd_idx)) ||
 	   ((fifo_wr_idx == FIFO_SLOTS-1) && (0 == fifo_rd_idx)))
 	{
-		overrun_cnt++;
+//		overrun_cnt++;
 		return;
 	}
 
@@ -72,7 +74,7 @@ void fifo_push(data_t* element)
 // Leaves CLK at 0 after the last bit.
 uint8_t fifo_pull_bit()
 {
-	if(fifo[fifo_rd_idx].abcd&((uint32_t)(1<<fifo_rd_bit_idx)))
+	if(fifo[fifo_rd_idx].abcd & fifo_rd_bit_mask)
 	{
 		DATA_1;
 	}
@@ -81,39 +83,40 @@ uint8_t fifo_pull_bit()
 		DATA_0;
 	}
 
-	fifo_rd_bit_idx++;
 	CLK_0;
-	if(fifo_rd_bit_idx > 31)
+
+	// Slow down the clock enough that the simple master code can keep up with it.
+	__asm__ __volatile__("nop");
+	__asm__ __volatile__("nop");
+	__asm__ __volatile__("nop");
+
+	fifo_rd_bit_mask <<= 1;
+	if(fifo_rd_bit_mask == 0) // '1' just shifted out from left - no more bits left in this packet.
 	{
-		fifo_rd_bit_idx = 0;
+		fifo_rd_bit_mask = 1;
 		fifo_rd_idx++;
 		if(fifo_rd_idx >= FIFO_SLOTS)
 			fifo_rd_idx = 0;
 		return 0;
-	}
-	else
-	{
-		__asm__ __volatile__("nop");
-		__asm__ __volatile__("nop");
-		__asm__ __volatile__("nop");
+		// Leave clock at '0'.
 	}
 
 	CLK_1;
 	return 1;
 }
 
+int main() __attribute__((noreturn));
 int main()
 {
 	PRR = 0b00001111;
 
 	DDRB  = 0b00000110;
-	PORTB = 0b00001000; // Manchester data input pull-up.
+	PORTB = 0b00111000; // Manchester data input pull-up. Unused pins pulled up.
 
 	GIMSK = 0b00100000; // pin change interrupt enable.
 	PCMSK = 0b00001000; // PCINT3 enable.
   	sbi(GIFR,5); // Clear PCINT flag.
 	sei();
-
 
 	while(1)
 	{
@@ -125,16 +128,19 @@ int main()
 			while(!DATA_RD);
 			// Pull bits until a complete packet is done.
 			while(fifo_pull_bit());
-			_delay_ms(1);
+			// Now: if there are more packets in FIFO, master is interrupted very quickly again.
+			// So at master, clear your interrupt flag even before the final bits, or at most
+			// a few cycles after the final bit, so that you get a new interrupt bending even
+			// if you didn't exit the ISR yet.
 		}
 
-	  	sbi(GIFR,5); // Clear PCINT flag.
 		MCUCR = 0b00110000;
 		__asm__ __volatile__("sleep");
 		// NORMALLY, the program stays exactly here, until there is a falling
 		// edge on the input pin.
 		MCUCR = 0b00000000;  // 1 clk
-
+		// Woke up from sleep - we have received a packet, so fifo_wr_idx is now incremented,
+		// unless it was a false alarm (spike).
 	}
 
 	return 0;

@@ -11,44 +11,47 @@
 
 #include "../common/manchester.h"
 
-uint8_t start_comm_err_cnt = 0;
-uint8_t middle_comm_err_cnt = 0;
-uint8_t end_comm_err_cnt = 0;
-uint8_t misc_comm_err_cnt = 0;
+uint8_t comm_error_cnt;
+uint8_t start_comm_err_cnt;
+uint8_t middle_comm_err_cnt;
+uint8_t end_comm_err_cnt;
+uint8_t misc_comm_err_cnt;
 
-uint8_t drive_en    = 0;
-uint8_t charge_en   = 0;
-uint8_t heat_en     = 0;
-uint8_t balancer_en = 0;
+uint8_t drive_en;
+uint8_t charge_en;
+uint8_t heat_en;
+uint8_t balancer_en;
 uint8_t batt_full   = 1;
-uint8_t batt_empty  = 0;
+uint8_t batt_empty;
 
 uint8_t batt_full_reset_soc = 97;
 
 
-int16_t last_max_I = 0;
-int16_t last_min_I = 0;
-int16_t last_avg_I = 0;
-int16_t last_avg_T = 0;
-int32_t As_count = 0;
+int16_t last_max_I;
+int16_t last_min_I;
+int16_t last_avg_I;
+int16_t last_avg_T;
+int32_t As_count;
 int32_t last_As_count = -999;
-int16_t Ah_count = 0;
-uint16_t cur_voltage = 0;
-int16_t range_left = 0;
+int16_t Ah_count;
+uint16_t cur_voltage;
+int16_t range_left;
 
-uint16_t pack_capacity_Ah = 0;
-int16_t SoC = 0;
+uint16_t pack_capacity_Ah;
+int16_t SoC;
 
 uint8_t over_SoC_limit = 110;
 
-uint8_t no_idle_mode = 0;
-uint8_t invert_current = 0;
+uint8_t no_idle_mode;
+uint8_t invert_current;
 
 volatile int16_t max_I_tmp = -30000;
 volatile int16_t min_I_tmp = 30000;
-volatile int32_t I_acc = 0;
-volatile uint16_t num_I_meas = 0;
-volatile int32_t raw_I_acc = 0;
+volatile int32_t I_acc;
+volatile uint16_t num_I_meas;
+volatile int32_t raw_I_acc;
+
+#define print_char(byte) {while((UCSR1A & 0b00100000) == 0) ; UDR1 = (byte); }
 
 
 uint8_t UART_byte_received()
@@ -58,22 +61,8 @@ uint8_t UART_byte_received()
 
 #define UART_BYTE UDR1
 
-
-void UART_init()
-{
-	UBRR1 = 8; // 8 MHz 115200 bps, remember to use 2x
-
-	UCSR1A = 0b00000010; // 2x mode.
-
-	// 8 data bits, 1 stop bit, no parity bit
-	UCSR1C = 0b00000110;
-
-	// Enable RX and TX, but no interrupts.
-	UCSR1B = 0b00011000;
-}
-
-
-
+#define POLL_T 1
+#define POLL_V 0
 
 void print_hex(uint8_t num)
 {
@@ -141,6 +130,25 @@ uint8_t clock = 0;
 #define NODE_HEAT_ENA  0b01000000
 #define NODE_COOL_ENA  0b10000000
 
+uint16_t hvc_limit       = 3600;
+uint16_t lvc_limit_ocv   = 2600;
+uint16_t shunt_limit     = 3700;
+uint16_t overtemp_limit  = 328;
+uint16_t charge_temp_limit = 273;
+uint16_t bat_heater_temp_limit = 276; 
+uint16_t wh_per_km = 150;
+
+uint8_t unclear_time_limit = 4;
+uint8_t lvc_filter_limit   = 4;
+
+uint8_t  temperature_poll_rate = 10;
+
+int16_t adc_offset = 192;
+int16_t adc_divider = 97;
+
+
+#define K2C(x) ((int16_t)(x)-273)
+#define C2K(x) ((int16_t)(x)+273)
 
 // Temperature in Celsius (int8_t), -128 = invalid
 
@@ -153,29 +161,6 @@ typedef struct
 	uint8_t t_last_valid_time;
 	uint8_t balance_time;
 } node;
-
-typedef struct
-{
-	uint16_t hvc;
-	uint16_t lvc;
-	int8_t overtemp;
-	int8_t undertemp;
-	int8_t heattemp;
-	int8_t cooltemp;
-} limits_type;
-
-limits_type limits = {3600, 2700, 60, 0, 5, 30};
-
-uint16_t wh_per_km = 150;
-
-uint8_t unclear_time_limit = 4;
-uint8_t lvc_filter_limit   = 4;
-
-uint8_t  temperature_poll_rate = 10;
-
-int16_t adc_offset = 192;
-int16_t adc_divider = 97;
-
 
 #define K2C(x) ((int16_t)(x)-273)
 #define C2K(x) ((int16_t)(x)+273)
@@ -207,7 +192,7 @@ uint8_t read_channelfifo(uint8_t chan, data_t* packet)
 
 	uint8_t bit_cnt = 31;
 
-	packet.abcd = 0;
+	(*packet).abcd = 0;
 
 	sbi(CHAN_RE_REG, re_pin);
 
@@ -252,7 +237,7 @@ uint8_t handle_packet(data_t* packet)
 		nodes[node].v = (uint16_t)(((uint16_t)(packet->b & 0x0f) << 8) | packet->c) << 1;
 		nodes[node].v_last_valid_time = clock;
 	}
-	else if(packet->b & 0b11110000) == 0b01100000)
+	else if((packet->b & 0b11110000) == 0b01100000)
 	{
 		uint16_t traw = ((uint16_t)(packet->b & 0x0f) << 8) | packet->c;
 		nodes[node].t = K2C(traw>>2); // 12-bit to 10-bit, 1 LSB = 1 deg C
@@ -266,12 +251,13 @@ uint8_t handle_packet(data_t* packet)
 
 	return 0;
 }
+uint8_t bridge_mode_on = 0;
 
-ISR(INT4_VECT)
+ISR(INT4_vect)
 {
 	data_t data;
 	read_channelfifo(0, &data);
-	if(bridge_mode_on)
+	if(1==1) //bridge_mode_on)
 	{
 		print_hex(data.a);
 		print_char(' ');
@@ -289,13 +275,13 @@ ISR(INT4_VECT)
 }
 
 
-#define HEATER_OFF()  cbi(PORTJ, 2);
+#define HEATER_OFF()  ; //cbi(PORTJ, 2);
 #define LOAD_OFF()    ; // cbi(PORTJ, 2);
-#define CHARGER_OFF() cbi(PORTJ, 3);
+#define CHARGER_OFF() ; //cbi(PORTJ, 3);
 
-#define HEATER_ON()  sbi(PORTJ, 2);
+#define HEATER_ON()  ; //sbi(PORTJ, 2);
 #define LOAD_ON()    ; // sbi(PORTJ, 2);
-#define CHARGER_ON() sbi(PORTJ, 3);
+#define CHARGER_ON() ; //sbi(PORTJ, 3);
 
 void save_bal_eeprom()
 {
@@ -379,6 +365,7 @@ void start_balancer()
 
 int16_t uart_read_int16()
 {
+	char buf[8];
 	uint8_t pos = 0;
 	while(1)
 	{
@@ -488,7 +475,7 @@ void assign_node_ids()
 	data.b = 0b10001100;
 	data.c = 1;
 	cli();
-	manchester_send(data);
+	manchester_send(&data);
 	_delay_ms(1);
 	sei();
 }
@@ -500,7 +487,7 @@ void shunt_node(uint8_t node, uint8_t time)
 	data.b = 0b10101100;
 	data.c = time;
 	cli();
-	manchester_send(data);
+	manchester_send(&data);
 	sei();
 }
 
@@ -568,7 +555,7 @@ uint8_t node_read_eeprom_8b(uint8_t node_id, uint8_t address, uint8_t* data)
 	msg.b = 0b10010000; // Retrieve 8-bit eeprom value
 	msg.c = address;
 
-	manchester_send(msg);
+	manchester_send(&msg);
 	_delay_ms(1);
 
 	if(manchester_wait_data_block_timeout(timeout_per_node*num_nodes))
@@ -592,7 +579,7 @@ uint8_t node_write_eeprom_8b(uint8_t node_id, uint8_t address, uint8_t data)
 	msg.a = node_id;
 	msg.b = 0b10101000;  // Enable eeprom modification for address
 	msg.c = address;
-	manchester_send(msg);
+	manchester_send(&msg);
 	_delay_ms(1);
 
 	if(manchester_wait_data_block_timeout(timeout_per_node*num_nodes))
@@ -606,7 +593,7 @@ uint8_t node_write_eeprom_8b(uint8_t node_id, uint8_t address, uint8_t data)
 
 	msg.b = 0b10011100; // Write 8-bit data
 	msg.c = data;
-	manchester_send(msg);
+	manchester_send(&msg);
 	_delay_ms(1);
 
 	if(manchester_wait_data_block_timeout(timeout_per_node*num_nodes))
@@ -634,24 +621,23 @@ void zero_I_offset()
 	sei();
 }
 
-uint8_t bridge_mode_on = 0;
 void bridge_mode(uint8_t calc_crc)
 {
 	bridge_mode_on = 1;
 	while(1)
 	{
-		uint8_t chan;
+//		uint8_t chan;
 		data_t packet;
-		while(!UART_byte_received());
-		chan = UART_BYTE-'0';
-		if(chan > 3)
-			return;
+//		while(!UART_byte_received());
+//		chan = UART_BYTE-'0';
+//		if(chan > 3)
+//			return;
 		for(uint8_t i = 0; i < 3; i++)
 		{
 			while(!UART_byte_received());
 			packet.block[i] = UART_BYTE;
 		}
-		manchester_send_1chan(&packet, chan);
+		manchester_send(&packet);
 	}
 	bridge_mode_on = 0;
 
@@ -659,6 +645,7 @@ void bridge_mode(uint8_t calc_crc)
 
 void config()
 {
+	char buf[12];
 	data_t msg;
 
 	while(1)
@@ -704,7 +691,7 @@ void config()
 		print_string("\r\n\r\n[1] Assign new node IDs starting from 1");
 		print_string("\r\n[2] Send custom message");
 		print_string("\r\n[3] Locate node");
-		print_string("\r\n[4] RS232 bridge mode ([shift-4] w/ CRC generation)");
+		print_string("\r\n[4] RS232 bridge mode w/ CRC generation");
 		print_string("\r\n[5] Re-zero current sensor offset");
 		print_string("\r\n[6] Set current integrator value");
 
@@ -803,7 +790,7 @@ void config()
 			}
 			msg.abcd <<= 4;
 			cli();
-			manchester_send(msg);
+			manchester_send(&msg);
 			_delay_ms(1);
 
 			uint8_t repl;
@@ -863,10 +850,6 @@ void config()
 
 		}
 		else if(key == '4')
-		{
-			bridge_mode(0);
-		}
-		else if(key == '¤')
 		{
 			bridge_mode(1);
 		}
@@ -1034,7 +1017,7 @@ void init_can()
 	CANGCON = 0b00000010; // Controller enable command
 
 
-	(CANGSTA & 0b100) // check if really enabled
+//	(CANGSTA & 0b100) // check if really enabled
 }
 
 uint8_t send_can_shit(uint16_t id, uint8_t* data, uint8_t datalen)
@@ -1064,43 +1047,54 @@ uint8_t send_can_shit(uint16_t id, uint8_t* data, uint8_t datalen)
 
 int main()
 {
-
+	char buf[12];
 	uint16_t last_timer_val = 0;
 
-	PRR0 = 0b11100110;
-	PRR1 = 0b00111110;
+	DDRA  = 0b11111111; // 7..4 manchester outputs, 3..0 GPO driver outputs
+	PORTA = 0b11110000; // Manchester outputs high.
+	DDRB  = 0b00000111; // 7..4 PCB extra pins, 3..0 SD card
+	PORTB = 0b11110000; // Pullups to PCB extra pins (unconnected so far)
+//	DDRC  = 0b10101010; // Channel fifo RE and Data pins.
+	DDRC  = 0b10000000; // Channel fifo RE and Data pins.
+	DDRD  = 0b00101000; // unused, canRx, canTx, unused, tx, rx, int1, unused
+	PORTD = 0b10010001; // Pullups to unused pins.
+//	DDRE  = 0b00000100; // 7..4 channelfifo interrupts, 3 unused, 2 SD PWR ena, PDO, PDI programming pins
+//	PORTE = 0b00001011; // Pullups to unused pins.
+//	DDRF  = 0b11111000; // 7..4 GPO driver outputs, nLEM_ENA, unused, ADC differential pins.
+//	PORTF = 0b00000100; // LEM power enable. Pull-up to unused pin.
+//	DDRG  = 0b00000010; // PG4,3 = 32kHz osc, PG2&0 = unused, PG1 = CAN_RS
+//	PORTG = 0b00000101; // Pullup to unused pins.
 
-	DDRJ = 0b00001110;
-	PORTJ = 0b00000011; // ylosveto manseinputtiin ja manseoutput ykkoseksi.
-	DDRC = 0xff;
-	DDRG = 0b00000010;
-	DDRD = 0b10000000;
+	UBRR1 = 8; // 8 MHz 115200 bps, remember to use 2x
+	UCSR1A = 0b00000010; // 2x mode.
+	// 8 data bits, 1 stop bit, no parity bit
+	UCSR1C = 0b00000110;
+	// Enable RX and TX, but no interrupts.
+	UCSR1B = 0b00011000;
 
+/*
 	ADMUX = 0b11010000;  // 2.56V reference, differential ADC0-ADC1  1x.
 	ADCSRB = 0b00000000; // free running mode
-
 	ADCSRA = 0b11101110; // prescaler = 64: 125 kHz. auto trigger.
 	DIDR0 = 0b00000011;
-
-	PORTG = 0b00000001; // Button pull-up.
+*/
 
 	TCCR1A = 0b00000000;
 	TCCR1B = 0b00000101; // 1024 prescaler
 
-	UART_init();
+	EICRB = 0b00000011;
+	EIMSK = 0b00010000;
 
+//	load_config();
+//	if(timeout_per_node > 200000)
+//		timeout_per_node = 20000;
 
-
-	load_config();
-	if(timeout_per_node > 200000)
-		timeout_per_node = 20000;
-
-	load_bal_eeprom();
-	last_clock_when_updated_balancer = balancer_unit_seconds - 2;
+//	load_bal_eeprom();
+//	last_clock_when_updated_balancer = balancer_unit_seconds - 2;
 
 //	init_calibration();
 
-	eep_load_temp_offsets();
+//	eep_load_temp_offsets();
 
 	print_string("BMS Master started.\r\n");
 
@@ -1109,7 +1103,15 @@ int main()
 	last_timer_val = TCNT1;
 	while(1)
 	{
-		uint8_t button_cnt = (~PING)&1;
+
+		data_t adata;
+		adata.a = 0b00111100;
+		adata.b = 0b10101010;
+		adata.c = 0b00110011;
+		cli();
+		manchester_send(&adata);
+		sei();
+
 		if(UART_byte_received())
 		{
 			char key = UART_BYTE;
@@ -1130,14 +1132,13 @@ int main()
 		print_string("clock=");
 		print_string(buf);
 		print_char(' ');
-		if(drive_en)    print_string("DRIVE ");
+/*		if(drive_en)    print_string("DRIVE ");
 		if(charge_en)   print_string("CHARGE ");
                 if(heat_en)     print_string("BATT_HEAT ");
 		if(balancer_en) print_string("BALANCER ");
 		if(batt_full)   print_string("BATT_FULL ");
-
-		button_cnt += (~PING)&1;
-
+*/
+/*
 		if(clock%temperature_poll_rate == 0)
 		{
 			if(broadcast_poll(POLL_T))
@@ -1179,11 +1180,10 @@ int main()
 			}
 
 		}
+*/
+//		uint16_t combined_flags = check_limits_all_nodes();
 
-		button_cnt += (~PING)&1;
-
-		uint16_t combined_flags = check_limits_all_nodes();
-
+/*
 		if(clock%temperature_poll_rate == 0)
 		{
 			for(uint8_t i = 0; i < num_nodes; i++)
@@ -1194,7 +1194,7 @@ int main()
 				print_char('=');
 				itoa(K2C(nodes[i].t), buf, 10);
 				print_string(buf);
-				if(nodes[i].t_last_sample_time != clock)
+				if(nodes[i].t_last_valid_time != clock)
 					print_char('*');
 
 				print_char(' ');
@@ -1209,14 +1209,12 @@ int main()
 			print_char('=');
 			utoa(nodes[i].v, buf, 10);
 			print_string(buf);
-			if(nodes[i].v_last_sample_time != clock)
+			if(nodes[i].v_last_valid_time != clock)
 				print_char('*');
 
 			print_char(' ');
 
 		}
-
-		button_cnt += (~PING)&1;
 
 		for(uint8_t i = 0; i < num_nodes; i++)
 		{
@@ -1230,25 +1228,14 @@ int main()
 				print_char(' ');
 			}
 		}
+*/
+//		print_flags(combined_flags);
 
-		print_flags(combined_flags);
-
-		for(uint8_t i = 0; i < num_nodes; i++)
+/*		for(uint8_t i = 0; i < num_nodes; i++)
 		{
 			if(nodes[i].flags&NODE_SHUNTING)
 				shunt_node(i+1, 10);
-		}
-
-/*		uint16_t avg_v;
-		uint32_t avg_v_acc = 0;
-		for(uint8_t node = 0; node < num_nodes; node++)
-			avg_v_acc += nodes[node].v;
-
-		avg_v_acc /= num_nodes;
-		avg_v = avg_v_acc; */
-
-		button_cnt += (~PING)&1;
-
+		}*/
 		if(balancer_en)
 		{
 			if((uint8_t)(clock - last_clock_when_updated_balancer) >= balancer_unit_seconds)
@@ -1288,10 +1275,6 @@ int main()
 			}
 
 		}
-
-		button_cnt += (~PING)&1;
-
-		button_cnt += (~PING)&1;
 
 
 		uint16_t new_timer_val;
@@ -1346,7 +1329,7 @@ int main()
 
 		accumulate_As(clock - last_clock);
 
-		print_string("lastMinI=");
+/*		print_string("lastMinI=");
 		itoa(last_min_I, buf, 10);
 		print_string(buf);
 
@@ -1409,7 +1392,7 @@ int main()
 			end_comm_err_cnt = 0;
 		if(misc_comm_err_cnt > 99)
 			misc_comm_err_cnt = 0;
-
+*/
 
 	}
 

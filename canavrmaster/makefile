@@ -33,7 +33,7 @@ TARGET = canavrmaster
 OBJDIR = obj
 
 # List C source files here. (C dependencies are automatically generated.)
-SRC = $(TARGET).c
+SRC = $(TARGET).c ../common/manchester.c
 
 
 # Optimization level, can be [0, 1, 2, 3, s]. 
@@ -58,7 +58,7 @@ CSTANDARD = -std=gnu99
 
 
 # Place -D or -U options here for C sources
-CDEFS = #-DMANCH_OUTPORT=PORTJ -DMANCH_OUTPIN=1 -DMANCH_INPORT=PINJ -DMANCH_INPIN=0 -DMANCH_INPORT_PULLUP=PORTJ
+CDEFS = -DMANCH_OUTPORT=PORTA -DMANCH_OUTPIN=4 #-DMANCH_INPORT=PINJ -DMANCH_INPIN=0 -DMANCH_INPORT_PULLUP=PORTJ
 
 
 #---------------- Compiler Options C ----------------
@@ -85,6 +85,7 @@ CFLAGS += -Wundef
 CFLAGS += -Wa,-adhlns=$(<:%.c=$(OBJDIR)/%.lst)
 CFLAGS += $(patsubst %,-I%,$(EXTRAINCDIRS))
 CFLAGS += $(CSTANDARD)
+CFLAGS += -ffunction-sections
 
 
 #---------------- Library Options ----------------
@@ -137,6 +138,7 @@ EXTMEMOPTS =
 LDFLAGS = -Wl,-Map=$(TARGET).map,--cref
 LDFLAGS += $(EXTMEMOPTS)
 LDFLAGS += $(PRINTF_LIB) $(SCANF_LIB) $(MATH_LIB)
+LDFLAGS += -gc-sections
 #LDFLAGS += -T linker_script.x
 
 
