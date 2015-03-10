@@ -64,6 +64,9 @@ uint8_t UART_byte_received()
 #define POLL_T 1
 #define POLL_V 0
 
+#define TP_ON() sbi(PORTB, 6)
+#define TP_OFF() cbi(PORTB, 6)
+
 void print_hex(uint8_t num)
 {
 	uint8_t hi = (num & 0xF0) >> 4;
@@ -118,7 +121,7 @@ uint32_t timeout_per_node = 20000;
 uint8_t last_global_status;
 data_t latest_problem_packet;
 
-uint8_t clock = 0;
+volatile uint8_t clock = 0;
 
 // Unclear is handled as both LVC+HVC.
 
@@ -162,13 +165,10 @@ typedef struct
 	uint8_t balance_time;
 } node;
 
-#define K2C(x) ((int16_t)(x)-273)
-#define C2K(x) ((int16_t)(x)+273)
-
 #define MAX_NODES 100
 
 // index+1 is ID.
-node nodes[MAX_NODES];
+volatile node nodes[MAX_NODES];
 
 uint8_t num_nodes = 8;
 
@@ -176,48 +176,30 @@ uint8_t num_nodes = 8;
 #define VOLT_DIV (uint32_t)2
 
 #define CHAN_RE_REG   PORTC
-#define CHAN_DATA_REG PINC
-#define CHAN_CLK_REG  PINE
+#define CHAN0_RE_IDX 7
+#define CHAN1_RE_IDX 5
+#define CHAN2_RE_IDX 3
+#define CHAN3_RE_IDX 1
 
-#define CHAN_READ_TIMEOUT 65000
+#define CHAN_DATA_REG PINC
+#define CHAN0_DATA_MSK 0b01000000
+#define CHAN1_DATA_MSK 0b00010000
+#define CHAN2_DATA_MSK 0b00000100
+#define CHAN3_DATA_MSK 0b00000001
+
+#define CHAN_CLK_REG  PINE
+#define CHAN0_CLK_MSK 0b00010000
+#define CHAN1_CLK_MSK 0b00100000
+#define CHAN2_CLK_MSK 0b01000000
+#define CHAN3_CLK_MSK 0b10000000
+
+// Channelfifo should interrupt data for only maximum of about 2 ms.
+// Timeout after 5 ms.
+// At 8 MHz, 5 ms is 400 000 cycles.
+// About ten cycles per timeout loop.
+#define CHAN_READ_TIMEOUT 40000
 
 #define FIFO_ERR_TIMEOUT 254
-
-uint8_t read_channelfifo(uint8_t chan, data_t* packet)
-{
-	uint8_t data_pin = (3-chan)<<1;
-	uint8_t re_pin = ((3-chan)<<1) + 1;
-	uint8_t clk_pin = chan+4;
-	uint16_t timeout = CHAN_READ_TIMEOUT;
-
-	uint8_t bit_cnt = 31;
-
-	(*packet).abcd = 0;
-
-	sbi(CHAN_RE_REG, re_pin);
-
-	while(timeout--)
-	{
-		// Wait until clk has falling edge:
-		if((CHAN_CLK_REG&(1<<clk_pin)) &&
-		   !(CHAN_CLK_REG&(1<<clk_pin)))
-		{
-			cbi(CHAN_RE_REG, re_pin);
-			timeout = CHAN_READ_TIMEOUT;
-			(*packet).abcd |= ( (CHAN_DATA_REG&(1<<data_pin)) >> data_pin ) << bit_cnt;
-			if(bit_cnt > 0)
-			{
-				bit_cnt--;
-			}
-			else
-			{
-				return 0;
-			}
-		}
-
-	}
-	return FIFO_ERR_TIMEOUT;
-}
 
 #define HANDLE_MASTER_PACKET 1
 #define HANDLE_ILLEGAL_NODE 2
@@ -231,6 +213,8 @@ uint8_t handle_packet(data_t* packet)
 		return HANDLE_MASTER_PACKET;
 	if(node > num_nodes || node == 0)
 		return HANDLE_ILLEGAL_NODE;
+
+	node--;
 	if((packet->b & 0b11110000) == 0b01000000)
 	{
 		// From 12-bit 2mvs to 16-bit mvs.
@@ -255,21 +239,70 @@ uint8_t bridge_mode_on = 0;
 
 ISR(INT4_vect)
 {
+	// It always takes some time for channelfifo to start
+	// sending data after receiving RE signal; we can use
+	// about 20 cycles of random stuff after giving it.
+	sbi(CHAN_RE_REG, CHAN0_RE_IDX);
+
 	data_t data;
-	read_channelfifo(0, &data);
-	if(1==1) //bridge_mode_on)
+	data.abcd = 0;
+	uint16_t timeout = CHAN_READ_TIMEOUT;
+	uint8_t bit_cnt = 31;
+	uint8_t fail = 1;
+
+	while(timeout--)
 	{
-		print_hex(data.a);
-		print_char(' ');
-		print_hex(data.b);
-		print_hex(data.c);
-		print_char(' ');
-		print_hex(data.d);
-		print_string(";\r\n");
+		if((CHAN_CLK_REG&CHAN0_CLK_MSK))
+		{
+			cbi(CHAN_RE_REG, CHAN0_RE_IDX);
+			timeout = CHAN_READ_TIMEOUT;
+			data.abcd >>= 1;
+			if(CHAN_DATA_REG&CHAN0_DATA_MSK)
+				data.abcd |= 0x80000000;
+
+			if(!(bit_cnt--))
+			{
+				fail = 0;
+				break;
+			}
+			// Normally, at this point, the clk is back to low.
+			// If the channelfifo was interrupted by incoming packet,
+			// clock may be held high.
+			while((CHAN_CLK_REG&CHAN0_CLK_MSK))
+			{
+				if(--timeout == 0)
+				{
+					break;
+				}
+			}
+		}
+
+	}
+	cbi(CHAN_RE_REG, CHAN0_RE_IDX);
+	sbi(EIFR, 4);
+
+
+	if(1==0) //bridge_mode_on)
+	{
+		if(fail)
+			print_string("FAIL");
+		else
+		{
+			print_hex(data.a);
+			print_char(' ');
+			print_hex(data.b);
+			print_hex(data.c);
+			print_char(' ');
+			print_hex(data.d);
+			print_string(";\r\n");
+		}
 	}
 	else
 	{
-		handle_packet(&data);
+		if(fail)
+			print_string("FAIL");
+		else
+			handle_packet(&data);
 	}
 
 }
@@ -1052,14 +1085,14 @@ int main()
 
 	DDRA  = 0b11111111; // 7..4 manchester outputs, 3..0 GPO driver outputs
 	PORTA = 0b11110000; // Manchester outputs high.
-	DDRB  = 0b00000111; // 7..4 PCB extra pins, 3..0 SD card
-	PORTB = 0b11110000; // Pullups to PCB extra pins (unconnected so far)
+	DDRB  = 0b01000111; // 7..4 PCB extra pins, 3..0 SD card
+	PORTB = 0b10110000; // Pullups to PCB extra pins (unconnected so far)
 //	DDRC  = 0b10101010; // Channel fifo RE and Data pins.
 	DDRC  = 0b10000000; // Channel fifo RE and Data pins.
 	DDRD  = 0b00101000; // unused, canRx, canTx, unused, tx, rx, int1, unused
 	PORTD = 0b10010001; // Pullups to unused pins.
-//	DDRE  = 0b00000100; // 7..4 channelfifo interrupts, 3 unused, 2 SD PWR ena, PDO, PDI programming pins
-//	PORTE = 0b00001011; // Pullups to unused pins.
+	DDRE  = 0b00000100; // 7..4 channelfifo interrupts, 3 unused, 2 SD PWR ena, PDO, PDI programming pins
+	PORTE = 0b11111011; // Pullups to INTn pins and unused pins.
 //	DDRF  = 0b11111000; // 7..4 GPO driver outputs, nLEM_ENA, unused, ADC differential pins.
 //	PORTF = 0b00000100; // LEM power enable. Pull-up to unused pin.
 //	DDRG  = 0b00000010; // PG4,3 = 32kHz osc, PG2&0 = unused, PG1 = CAN_RS
@@ -1082,19 +1115,15 @@ int main()
 	TCCR1A = 0b00000000;
 	TCCR1B = 0b00000101; // 1024 prescaler
 
-	EICRB = 0b00000011;
+//	EICRB = 0b00000000;
 	EIMSK = 0b00010000;
 
-//	load_config();
+	load_config();
 //	if(timeout_per_node > 200000)
 //		timeout_per_node = 20000;
 
 //	load_bal_eeprom();
 //	last_clock_when_updated_balancer = balancer_unit_seconds - 2;
-
-//	init_calibration();
-
-//	eep_load_temp_offsets();
 
 	print_string("BMS Master started.\r\n");
 
@@ -1105,12 +1134,25 @@ int main()
 	{
 
 		data_t adata;
-		adata.a = 0b00111100;
-		adata.b = 0b10101010;
-		adata.c = 0b00110011;
+		adata.a = 0xff;
+		adata.b = 0b10001100;
+		adata.c = 0x00;
 		cli();
 		manchester_send(&adata);
 		sei();
+
+		if(clock%temperature_poll_rate == 0)
+		{
+			_delay_ms(7);
+			for(uint8_t i = 0; i < num_nodes; i++)
+				_delay_ms(7);
+			adata.a = 0xff;
+			adata.b = 0b10001110;
+			adata.c = 0x00;
+			cli();
+			manchester_send(&adata);
+			sei();
+		}
 
 		if(UART_byte_received())
 		{
@@ -1183,7 +1225,8 @@ int main()
 */
 //		uint16_t combined_flags = check_limits_all_nodes();
 
-/*
+		_delay_ms(100);
+
 		if(clock%temperature_poll_rate == 0)
 		{
 			for(uint8_t i = 0; i < num_nodes; i++)
@@ -1192,7 +1235,7 @@ int main()
 				utoa(i+1, buf, 10);
 				print_string(buf);
 				print_char('=');
-				itoa(K2C(nodes[i].t), buf, 10);
+				itoa(nodes[i].t, buf, 10);
 				print_string(buf);
 				if(nodes[i].t_last_valid_time != clock)
 					print_char('*');
@@ -1228,7 +1271,7 @@ int main()
 				print_char(' ');
 			}
 		}
-*/
+
 //		print_flags(combined_flags);
 
 /*		for(uint8_t i = 0; i < num_nodes; i++)
@@ -1329,7 +1372,7 @@ int main()
 
 		accumulate_As(clock - last_clock);
 
-/*		print_string("lastMinI=");
+		print_string("lastMinI=");
 		itoa(last_min_I, buf, 10);
 		print_string(buf);
 
@@ -1384,15 +1427,6 @@ int main()
 		}
 		last_avg_T = temper/num_nodes;
 
-		if(start_comm_err_cnt > 99)
-			start_comm_err_cnt = 0;
-		if(middle_comm_err_cnt > 99)
-			middle_comm_err_cnt = 0;
-		if(end_comm_err_cnt > 99)
-			end_comm_err_cnt = 0;
-		if(misc_comm_err_cnt > 99)
-			misc_comm_err_cnt = 0;
-*/
 
 	}
 
