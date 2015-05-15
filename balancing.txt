@@ -1,0 +1,273 @@
+Balancing algorithm
+
+
+
+
+Preface
+
+The purpose of (top) balancing is to make so that all cells hit 100% SoC at exactly the
+same time when charging, i.e., they are full together. When capacity differences occur
+as in any real system, the SoC levels do not match at bottom, i.e., when the pack is empty.
+
+The primary purpose of top balancing is to maximize pack energy storage capability, since the 
+cells provide their charge at maximum possible voltage. (Balancing at any other point at the 
+SoC line provides a little bit less energy stored in the pack, although the same amount of
+charge (coulombs).)
+
+In a balanced pack, the smallest cell capacity defines the pack capacity. When discharging a
+top balanced pack, the smallest cell reaches the low-voltage cutoff level first.
+
+----------------------------------------------------------------------------------------------------
+
+TOP-BALANCED PACK
+
+      Full                           Empty
+
+   SoC          Charge Voltage        SoC          Charge Voltage     
+|||||||||| 100%  10Ah    3.45V     ||--------  20%  2Ah    3.10V
+|||||||||| 100%   9Ah    3.45V     |---------  11%  1Ah    3.00V
+|||||||||| 100%  11Ah    3.45V     |||-------  27%  3Ah    3.12V
+|||||||||| 100%  10Ah    3.45V     ||--------  20%  2Ah    3.10V
+|||||||||| 100%   8Ah    3.45V     ----------   0%  0Ah    2.80V
+
+                         ---> delta Charge = 8Ah (the capacity of the smallest cell)
+
+UNBALANCED PACK
+
+      Full                           Empty
+
+   SoC          Charge Voltage        SoC          Charge Voltage     
+||||||---- 60%    6Ah    3.28V     |||-------  30%  3Ah    3.14V
+|||||||||- 89%    8Ah    3.35V     ||||||----  55%  5Ah    3.27V
+|||------- 27%    3Ah    3.12V     ----------   0%  0Ah    2.80V
+|||||||||| 100%  10Ah    3.45V     |||||||---  70%  7Ah    3.30V
+|||||----- 50%    4Ah    3.25V     |---------  13%  1Ah    3.02V
+
+                         ---> delta Charge = 3Ah.
+
+----------------------------------------------------------------------------------------------------
+
+An unbalanced pack does not have a point where all cells share a common SoC%. Such a pack may have
+severely reduced capacity, because the highest cell (cell with most charge) defines when to stop
+charging and the lowest cell (cell with least charge) defines when to stop discharging, and
+this difference may be smaller than even the smallest cell in the system.
+
+Pack can be (top) balanced by charging every cell separately so that they are at 100%, before connecting
+in series.
+
+Assuming ideal battery technology, charging and discharging series-connected cells itself does not 
+change the balance, because the series connection simply forces exactly the same current through every 
+cell and hence, exactly the same amount of charge (coulombs (As), or Ah) is consumed from every cell.
+
+So the only way the pack can drift away from a balanced state is an excess external connection
+over some of the cells; or it can be an internal mechanism in the cell.
+
+An external way to cause unbalance is to design a BMS that uses too much current so that it's significant.
+(Actually, only the _difference_ between the current consumed between the cell modules is relevant, but 
+one typically leads to other.) 
+
+This BMS is designed to have mimimal current consumption which is well below the internal cell self discharge.
+
+Assuming no unbalanced external connections, the battery technology itself has two internal mechanisms
+causing uneven charge drain: differences in Coulombic Efficiency, and differences in Self Discharge (i.e.,
+Leakage Current).
+
+Because the cell consists of a very large surface area of the electrodes with very low distance
+from each other, only separated by a thin, porous plastic sheet, impregnated with electrolyte solution,
+this construction will inevitably conduct some electricity, hence causing self discharge. Because of the
+very large variations measured between self discharge effect, manufacturer tend to specify a lot worse
+than average conditions. Hence, for some Chinese prismatic LiFePO4 cells, 3% of capacity per month
+is often specified but rarely measured in real life. Most manufacturers do not specify self-discharge at
+all. 
+
+It is indeed typical that the self discharge is so low that it is difficult to measure at all and causes
+only minimal drift, hence advocating the use of non-balancing (only monitoring) BMS or no BMS at all.
+A small portion of cells however can exhibit considerable self discharge, especially after aging, and
+therefore some balancing mechanism is a good-to-have in the BMS designer's toolbox. 
+In addition, it isn't guaranteed that all future products or different chemistries would have as good 
+self discharge features as li-ion cells currently available.
+
+
+
+
+
+Balancing
+
+A theoretically optimum way to balance a pack is to provide charge to those cells that lack behind at the end of
+charging. However, this requires expensive isolated converters that can supply power to the cells
+independently even when they are series-connected by fixed connections. This is the preferred way with 
+lead-acid batteries as they have quite a bit of balance drift.
+
+However, as lithium ion needs only very little balancing action, an easier way of dissipating "excess" charge
+from full cells as heat (called "shunting") is typically used. If the shunting current equals to 
+charging current, the net effect at the cell is zero, and the charging can be continued as long as it takes
+to get the lowest cell full, without danger of overcharging the highest cells - after all, all the 
+charging current is turned into heat; you could say the current "skips" the cells through a resistor.
+
+Because li-ion balance drifts only very little, this kind of "shunting" fixes the unbalance
+in just seconds, without wasting much energy as heat at all.
+
+In practice, having a balance current that matches the charging current would not only be horribly expensive
+but it would also pose a serious problem of heat removal in case the battery unbalance is not minor after all,
+or there is any design error that leaves the resistor on, so balancing with a current more than, say, 
+500 mA is definitely out of question.
+
+So in practice, BMS's need to request the charger to lower their charge current for the balancing stage, or utilize
+the end of the CV charging stage where the current is low. But even C/20 stopping current is a lot more than
+practical dissipative shunting can support. Therefore, practically any BMS can not fully rebalance an unbalanced pack
+"in real time" during the charging.
+
+Therefore, the integrated balancing function in most if not all li-ion BMS's is only there to compensate
+for very low-level drift caused by self-discharge and BMS's own consumption and cannot provide gross balancing.
+In any case, the "shunting" current is lower than charging current at the same point so the "shunting" becomes,
+strictly speaking, a misleading term. The purpose is to remove a small bit of energy from some of the cells so
+that the SoC%s match more closely at 100%. A gross unbalance is only fixed a little bit at a time, and there
+is always a negligible unbalance left.
+
+So, given the low self-discharge of the cells, and the very low discharging action of our BMS design,
+while agreeing that some balancing is good to have, we questioned the need for even the typical 200-500 mA range
+of balancing currents. Even 500 mA is NOT enough to provide gross balancing anyway, and it cannot fully balance
+in real time. Additionally, it can cause thermal design problems and at least increases the BMS cost. The only 
+benefit of such a large balancing current is the ability to use higher-discharge ("almost faulty") cells, 
+those that have self-discharge in the range of 1-3% per month.
+
+However, typical shunting BMS's still don't implement much intelligence in how they remove energy from the cells, so they
+do shunting only during the end of the charging stage, which can be very short in time. We felt that we could
+remove the same amount of energy from the cells by using 1/10th of the current for 10 times longer. Note that
+it is irrelevant when this is done; it doesn't need to be at the end of the charging stage. Li-ion doesn't need
+to end up at 100%; it can end up at 99.9% with no problem. This means that due to unbalance, charging stops when
+first cell hits 100%, while the lowest cell is at 99.9%; then, energy is removed from all other cells to match 99.9%.
+
+This actually makes more sense than carefully charging at very low currents for a long time to exactly match 100%,
+and saves energy because a high-power charger is inevitably very inefficient at nanoscopic currents. Having the cells
+lack the amount of charge equaling the differences in smallest and largest self discharge * time interval between
+two charges, will be minimal and will correspond to maybe a few inches of actual drive range in an EV. Lengthening
+the charge process to carefully top off at 100% every time is not worth it.
+
+An additional benefit in our approach is that no system error can accidentally cause large amount of shunting, causing
+heat problems or quick discharging of the cell (which would destroy the cell).
+
+But while other BMS's have just thrown in the dissipative balancing that happens at a certain voltage during the top-off
+period, our approach needs a little bit more intelligent algorithm consideration to be able to handle the same amount
+of dissipation of charge (or even more!) with high self-discharge cells, if those exist in the system.
+
+Note that these algorithms apply to almost all BMS's, excluding those with powerful redistributive (isolated charging)
+features or very strong (separately cooled) dissipative shunting. Most still do not implement these. We just have 
+an stronger reason to think about this because we really lack the "raw power" in shunting.
+
+
+
+
+The Balancing Algorithm
+
+The first revision still uses only the time between the finishing of the charge and the startup of the car for
+balancing, like most BMS's; the difference is that the charger doesn't need to stay on at low power 
+(or pulsed at low duty cycle) during the balancing, which, in practice, increases the amount of time available
+for balancing in most cases (e.g., chargers use timers to terminate the CV phase eventually, etc.)
+
+What we actually need to do is to know the self-discharge of all cells Ileak_0...Ileak_n, and time spent after
+last balancing t, and then remove charge C_i = t*(min(Ileak) - Ileak_i) from all cells i=0...n.
+
+In practice however, we do not know the self-discharges, they are very difficult to measure, and even if we did,
+they could change as the cells age. The process would be error prone. That's why no BMS uses this kind of approach;
+they just approximate the SoC from the voltage and remove "some" amount of charge from the higher voltage cells.
+As long as the charge removed is more than C_i defined above and at sane levels, the cell unbalance is not increased
+over a certain level. (Let's remember that the balance is only there to maximize energy; a small unbalance is not
+worth fixing if that costs too much or increases complexity, as the actual gain would be a few more inches of range).
+
+At the end of the charge, we know which cells are higher than others, and can simply remove some charge from them. This
+can be done according to the voltage differential, e.g., if a cell is 100 mV higher than the lowest cell, we remove
+double the charge from that cell compared to another that is only 50 mV higher. Doing this after charging ends would
+leave the pack a bit undercharged, as energy is removed. This is however the simplest algorithm that doesn't need a 
+memory element. Let's call this Algorithm 1.
+
+A better way would be storing the voltage readings at the end of the charge in (the master's) EEPROM. Then, we could
+start the shunting at the beginning of the next charging, instead of doing it after the fact. So, at the end of the
+charging, the unbalance would already be fixed and the pack could remain at balanced 100% SoC. Let's call this 
+Algorithm 2. This is effectively the same as Algorithm 1 in how it balances the pack, but it leaves the pack at 
+full state without the need of starting the charger up again (or running it at very low current).
+
+
+Algorithm 1:
+
+3.55V   -> +0.10  -> Shunt for 10 minutes
+3.65V*  -> +0.20  -> Shunt for 20 minutes
+3.60V   -> +0.15  -> Shunt for 15 minutes
+3.45V** -> +0.00  -> Do not shunt
+3.50V   -> +0.05  -> Shunt for 5 minutes
+
+*) Hits HVC, save the voltages and then stop charging.
+**) Lowest, use as the reference level (no shunting).
+
+Algorithm 2:
+
+Same, but save the values in non-volatile memory and start shunting the next time charger is run.
+
+
+Algorithm 3:
+
+But what if "20 minutes" is not enough to fix the voltage differential of 0.20V, or if it is too much?
+A self-tuning multiplier is introduced that tunes the algorithm to the curve steepness of the actual battery
+(which is the function of battery chemistry, cell capacity, internal resistance and charging current just before
+stopping, which, hopefully, are all more or less constants but unknown).
+
+For this purpose, we would store the voltage differentials of the two latest charging endpoints.
+
+ First charging                Second charging
+
+3.55V    +0.10  -> Shunt for 10 minutes  ->  3.58V   +0.07
+3.65V*   +0.20  -> Shunt for 20 minutes  ->  3.65V*  +0.14
+3.60V    +0.15  -> Shunt for 15 minutes  ->  3.62V   +0.11
+3.45V**  +0.00  -> Do not shunt          ->  3.51V** +0.00
+3.50V    +0.05  -> Shunt for 5 minutes   ->  3.55V   +0.04
+
+Now we would see that, for every cell, the differential has reduced to about 70% of the original. If we
+wanted to remove the differential (i.e., reduce it to 0%) for a fully balanced pack, we would increase
+the multiplier to 3.33 times the current multiplier, i.e., 20-minute shunting would become 66.7-minute
+shunting, hence:
+
+ First charging                Second charging               Third charging:
+
+3.55V    +0.10  -> Shunt for 10 minutes  ->  3.58V   +0.07  -> Shunt for 23 minutes
+3.65V*   +0.20  -> Shunt for 20 minutes  ->  3.65V*  +0.14  -> Shunt for 47 minutes
+3.60V    +0.15  -> Shunt for 15 minutes  ->  3.62V   +0.11  -> Shunt for 37 minutes
+3.45V**  +0.00  -> Do not shunt          ->  3.51V** +0.00  -> Do not shunt
+3.50V    +0.05  -> Shunt for 5 minutes   ->  3.55V   +0.04  -> Shunt for 13 minutes.
+
+
+This basically means a P controller for balancing, and a PI controller to control the P term.
+
+We can have separate multiplier (P term) for every cell, or share the term because the conditions
+(cell chemistry, capacity etc.) should be same for the pack so this would help averaging possible errors
+out.
+
+Probably, to avoid oscillations, we wouldn't want to try to fully fix the unbalance for the next charge,
+so if the differential was reduced to 70% of the original, we wouldn't increase the multiplier to 3.33
+times the current multiplier, but maybe to 1.5 or 2 times the current multiplier. This way, the multiplier
+would slowly reach the values really needed to balance the pack as quickly as possible.
+
+Multiplier as well as shunting times naturally need limits.
+
+Also, when the algorithm has balanced the pack, it's expected that the voltage differentials will be close
+to zero (after all, that's the purpose of the algorithm). In this case, it's impossible to accurately
+calculate a new multiplier. But this is easily addressed by using some kind of threshold in the multiplier
+control loop. This may automatically result in from integer (fixed point decimal) calculation.
+
+Note that time between the charges doesn't need to be taken into account, because we use voltage differentials.
+If the cell has more time to self-discharge, it will inevitable develop even lower voltage. This is the beauty of
+the simplicity of the P controller.
+
+Now, if the car would be left unused for some time and some of the cells would therefore self discharge
+more than others, the multiplier would be already tuned so that the realized voltage differential would
+give proper shunting times.
+
+The problem here is of course the strong non-linearity of cell voltage vs. charge. Therefore, the
+algorithm only works on a small portion of the curve which is very close to the endpoint.
+
+
+
+
+
+
+
+
