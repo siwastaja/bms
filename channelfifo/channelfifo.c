@@ -21,9 +21,12 @@
 //            keeps data read high at least until receives the first clock pulse
 // Clock out starts at 0. Every rising edge denotes a new bit.
 // 32 bits of data.
+// Master must be quick enough to read all the bits; channelfifo does the clocking.
 // If a new packet is received during this, clocking of the data ceases temporarily. Master must wait.
 // The BMS architecture guarantees that at least for every packet (2 ms), there is equal pause (2 ms),
-// so the FIFO->master communication cannot be starved due to incoming traffic, only slowed down.
+// so the FIFO->master communication cannot be starved due to incoming traffic, only slowed down,
+// because during the 2 ms pause, several packets can be transferred (todo: measure/disassemble how
+// many. At least 4 I guess).
 
 
 //#define STAT_RX_ERR      1
