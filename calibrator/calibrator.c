@@ -155,7 +155,7 @@ void uart_send_packet(data_t* packet)
 //	printf("Sent %02x %02x %02x %02x\n", buf[0], buf[1], buf[2], buf[3]);
 }
 
-#define INTERBYTE_TIMEOUT 3
+#define INTERBYTE_TIMEOUT 30
 
 int uart_read_packet(data_t* packet, int timeout)
 {
@@ -166,6 +166,7 @@ int uart_read_packet(data_t* packet, int timeout)
 	{
 		usleep(1000);
 		rcv_cnt += read(fd, &(buf[rcv_cnt]), 4-rcv_cnt);
+
 		if(timeout)
 			timeout--;
 		if(timeout == 1)

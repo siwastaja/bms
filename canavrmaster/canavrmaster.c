@@ -1,10 +1,11 @@
-#define F_CPU 8000000UL
+#define F_CPU 16000000UL
 
 #include <inttypes.h>
 #include <avr/io.h>
 #include <avr/eeprom.h>
 #include <avr/interrupt.h>
 #include <avr/sfr_defs.h>
+#include <avr/pgmspace.h>
 #include <util/delay.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,7 +44,6 @@ int16_t SoC;
 uint8_t over_SoC_limit = 110;
 
 uint8_t no_idle_mode;
-uint8_t invert_current;
 
 volatile int16_t max_I_tmp = -30000;
 volatile int16_t min_I_tmp = 30000;
@@ -145,6 +145,8 @@ uint8_t unclear_time_limit = 4;
 uint8_t lvc_filter_limit   = 4;
 
 uint8_t  temperature_poll_rate = 10;
+#define POLL_CLOCK_MASK 0b00000111
+
 
 int16_t adc_offset = 192;
 int16_t adc_divider = 97;
@@ -235,13 +237,14 @@ uint8_t handle_packet(data_t* packet)
 
 	return 0;
 }
-uint8_t bridge_mode_on = 0;
+
+uint8_t fifo_rcv_fail_cnt = 0;
 
 ISR(INT4_vect)
 {
 	// It always takes some time for channelfifo to start
 	// sending data after receiving RE signal; we can use
-	// about 20 cycles of random stuff after giving it.
+	// about 20 cycles for init stuff after giving the signal.
 	sbi(CHAN_RE_REG, CHAN0_RE_IDX);
 
 	data_t data;
@@ -282,28 +285,10 @@ ISR(INT4_vect)
 	sbi(EIFR, 4);
 
 
-	if(1==0) //bridge_mode_on)
-	{
-		if(fail)
-			print_string("FAIL");
-		else
-		{
-			print_hex(data.a);
-			print_char(' ');
-			print_hex(data.b);
-			print_hex(data.c);
-			print_char(' ');
-			print_hex(data.d);
-			print_string(";\r\n");
-		}
-	}
+	if(fail)
+		fifo_rcv_fail_cnt++;
 	else
-	{
-		if(fail)
-			print_string("FAIL");
-		else
-			handle_packet(&data);
-	}
+		handle_packet(&data);
 
 }
 
@@ -405,7 +390,7 @@ int16_t uart_read_int16()
 		if(UART_byte_received())
 		{
 			char key = UART_BYTE;
-			if(key == '\r' || key == '\n')
+			if(key == '\r' || key == '\n' || key == ';')
 			{
 				break;
 			}
@@ -431,10 +416,14 @@ int16_t uart_read_int16()
 	return atoi(buf);
 }
 
-#define NUM_CONF_PARAMS 20
+#define NUM_CONF_PARAMS 24
 
 const char* config_texts[NUM_CONF_PARAMS] =
 {"n_cells",
+"ch1_start_idx",
+"ch2_start_idx",
+"ch3_start_idx",
+"ch4_start_idx",
 "hvc_mv",
 "lvc_mv",
 "overtemp",
@@ -447,7 +436,6 @@ const char* config_texts[NUM_CONF_PARAMS] =
 "over_soc_shutdown",
 "timeout_per_node_ms",
 "shunt_limit",
-"invert_current",
 "bat_heater_low_limit",
 "wh_per_km",
 "balancer_low_v",
@@ -459,7 +447,11 @@ const char* config_texts[NUM_CONF_PARAMS] =
 
 const int16_t config_limit_mins[NUM_CONF_PARAMS] =
 {1,
-3300,
+-1,
+-1,
+-1,
+-1,
+3000,
 1800,
 20,
 -10,
@@ -471,7 +463,6 @@ const int16_t config_limit_mins[NUM_CONF_PARAMS] =
 101,
 2,
 3200,
-0,
 -10,
 10,
 2000,
@@ -481,8 +472,12 @@ const int16_t config_limit_mins[NUM_CONF_PARAMS] =
 
 const int16_t config_limit_maxs[NUM_CONF_PARAMS] =
 {MAX_NODES,
-4350,
-3500,
+MAX_NODES,
+MAX_NODES,
+MAX_NODES,
+MAX_NODES,
+4400,
+4200,
 60,
 40,
 20,
@@ -493,7 +488,6 @@ const int16_t config_limit_maxs[NUM_CONF_PARAMS] =
 200, // over-SoC
 250,
 5000,
-1,
 30,
 2000,
 5000,
@@ -501,16 +495,39 @@ const int16_t config_limit_maxs[NUM_CONF_PARAMS] =
 20000,
 2000};
 
+
+uint8_t channel_start_idxs[4];
+
+// Resolve the channel and send the packet in the right channel.
+// If config is illegal and channel cannot be resolved, data is
+// sent on the last channel.
+/*
+void manchester_send_1node(bms_packet_t* data, uint8_t node)
+{
+	uint8_t chan;
+	for(chan = 0; chan < 3; chan++)
+	{
+		if(node < channel_start_idxs[chan+1])
+		{
+			break;
+		}
+	}
+	manchester_send_1chan(data, chan);
+}
+*/
 void assign_node_ids()
 {
-	data_t data;
-	data.a = 255;
-	data.b = 0b10001100;
-	data.c = 1;
-	cli();
-	manchester_send(&data);
-	_delay_ms(1);
-	sei();
+	for(uint8_t chan = 0; chan < 4; chan++)
+	{
+		if(channel_start_idxs[chan] == 0)
+			break;
+
+		data_t data;
+		data.a = 255;
+		data.b = 0xb0;
+		data.c = channel_start_idxs[chan];
+//		manchester_send_1chan(&data, chan);
+	}
 }
 
 void shunt_node(uint8_t node, uint8_t time)
@@ -542,13 +559,17 @@ void save_config()
 	eeprom_write_byte((uint8_t*)20, over_SoC_limit);
 	eeprom_write_dword((uint32_t*)22, timeout_per_node);
 	eeprom_write_word((uint16_t*)26, shunt_limit);
-	eeprom_write_byte((uint8_t*)28, invert_current);
+	// gap, can be reused
 	eeprom_write_word((uint16_t*)30, bat_heater_temp_limit);
 	eeprom_write_word((uint16_t*)32, wh_per_km);
 	eeprom_write_word((uint16_t*)34, balancer_low_v_point);
 	eeprom_write_word((uint16_t*)36, balancer_high_v_point);
 	eeprom_write_word((uint16_t*)38, adc_offset);
 	eeprom_write_word((uint16_t*)40, adc_divider);
+	eeprom_write_byte((uint8_t*)42, channel_start_idxs[0]);
+	eeprom_write_byte((uint8_t*)44, channel_start_idxs[0]);
+	eeprom_write_byte((uint8_t*)46, channel_start_idxs[0]);
+	eeprom_write_byte((uint8_t*)48, channel_start_idxs[0]);
 }
 
 void load_config()
@@ -568,13 +589,17 @@ void load_config()
 	over_SoC_limit = eeprom_read_byte((uint8_t*)20);
 	timeout_per_node = eeprom_read_dword((uint32_t*)22);
 	shunt_limit = eeprom_read_word((uint16_t*)26);
-	invert_current = eeprom_read_byte((uint8_t*)28);
+	// gap, can be reused
 	bat_heater_temp_limit = eeprom_read_word((uint16_t*)30);
 	wh_per_km = eeprom_read_word((uint16_t*)32);
 	balancer_low_v_point = eeprom_read_word((uint16_t*)34);
 	balancer_high_v_point = eeprom_read_word((uint16_t*)36);
 	adc_offset = eeprom_read_word((uint16_t*)38);
 	adc_divider = eeprom_read_word((uint16_t*)40);
+	channel_start_idxs[0] = eeprom_read_byte((uint8_t*)42);
+	channel_start_idxs[1] = eeprom_read_byte((uint8_t*)44);
+	channel_start_idxs[2] = eeprom_read_byte((uint8_t*)46);
+	channel_start_idxs[3] = eeprom_read_byte((uint8_t*)48);
 
 	batt_full = eeprom_read_byte((uint8_t*)999);
 	As_count = eeprom_read_dword((uint32_t*)1000);
@@ -654,28 +679,6 @@ void zero_I_offset()
 	sei();
 }
 
-void bridge_mode(uint8_t calc_crc)
-{
-	bridge_mode_on = 1;
-	while(1)
-	{
-//		uint8_t chan;
-		data_t packet;
-//		while(!UART_byte_received());
-//		chan = UART_BYTE-'0';
-//		if(chan > 3)
-//			return;
-		for(uint8_t i = 0; i < 3; i++)
-		{
-			while(!UART_byte_received());
-			packet.block[i] = UART_BYTE;
-		}
-		manchester_send(&packet);
-	}
-	bridge_mode_on = 0;
-
-}
-
 void config()
 {
 	char buf[12];
@@ -695,38 +698,64 @@ void config()
 			switch(i)
 			{
 				case 0: utoa(num_nodes, buf, 10); break;
-				case 1: utoa(hvc_limit, buf, 10); break;
-				case 2: utoa(lvc_limit_ocv, buf, 10); break;
-				case 3: itoa(K2C(overtemp_limit), buf, 10); break;
-				case 4: itoa(K2C(charge_temp_limit), buf, 10); break;
-				case 5: utoa(unclear_time_limit, buf, 10); break;
-				case 6: utoa(lvc_filter_limit, buf, 10); break;
-				case 7: utoa(balancer_unit_seconds, buf, 10); break;
-				case 8: utoa(temperature_poll_rate, buf, 10); break;
-				case 9: utoa(pack_capacity_Ah, buf, 10); break;
-				case 10: utoa(over_SoC_limit, buf, 10); break;
-				case 11: utoa(timeout_per_node/534, buf, 10); break;
-				case 12: utoa(shunt_limit, buf, 10); break;
-				case 13: utoa(invert_current, buf, 10); break;
-				case 14: itoa(K2C(bat_heater_temp_limit), buf, 10); break;
-				case 15: utoa(wh_per_km, buf, 10); break;
-				case 16: utoa(balancer_low_v_point, buf, 10); break;
-				case 17: utoa(balancer_high_v_point, buf, 10); break;
-				case 18: itoa(adc_offset, buf, 10); break;
-				case 19: itoa(adc_divider, buf, 10); break;
+				case 1: utoa(channel_start_idxs[0], buf, 10); break;
+				case 2: utoa(channel_start_idxs[1], buf, 10); break;
+				case 3: utoa(channel_start_idxs[2], buf, 10); break;
+				case 4: utoa(channel_start_idxs[3], buf, 10); break;
+				case 5: utoa(hvc_limit, buf, 10); break;
+				case 6: utoa(lvc_limit_ocv, buf, 10); break;
+				case 7: itoa(K2C(overtemp_limit), buf, 10); break;
+				case 8: itoa(K2C(charge_temp_limit), buf, 10); break;
+				case 9: utoa(unclear_time_limit, buf, 10); break;
+				case 10: utoa(lvc_filter_limit, buf, 10); break;
+				case 11: utoa(balancer_unit_seconds, buf, 10); break;
+				case 12: utoa(temperature_poll_rate, buf, 10); break;
+				case 13: utoa(pack_capacity_Ah, buf, 10); break;
+				case 14: utoa(over_SoC_limit, buf, 10); break;
+				case 15: utoa(timeout_per_node/534, buf, 10); break;
+				case 16: utoa(shunt_limit, buf, 10); break;
+				case 17: itoa(K2C(bat_heater_temp_limit), buf, 10); break;
+				case 18: utoa(wh_per_km, buf, 10); break;
+				case 19: utoa(balancer_low_v_point, buf, 10); break;
+				case 20: utoa(balancer_high_v_point, buf, 10); break;
+				case 21: itoa(adc_offset, buf, 10); break;
+				case 22: itoa(adc_divider, buf, 10); break;
 				default: break;
 			}
 			print_string(buf);
 
 		}
 
+		// Print channel configuration for sanity check:
+		// ei tää näin mene
+		uint8_t num_nodes_per_ch[4];
+		num_nodes_per_ch[3] = num_nodes;
+		for(uint8_t i = 1; i < 4; i++)
+		{
+			if(channel_start_idxs[i] == 0)
+				num_nodes_per_ch[i] = 0;
+			num_nodes_per_ch[3] -= (num_nodes_per_ch[i-1] = channel_start_idxs[i]-1);
+		}
 
-		print_string("\r\n\r\n[1] Assign new node IDs starting from 1");
+		print_string("\r\n\r\nChannel config: ");
+		for(uint8_t i = 0; i < 4; i++)
+		{
+			print_string("CH");
+			itoa(i, buf, 10); print_string(buf);
+			print_string(": IDs ");
+			itoa(channel_start_idxs[i], buf, 10); print_string(buf);
+			print_string("...");
+			itoa(channel_start_idxs[i]+num_nodes_per_ch[i], buf, 10); print_string(buf);
+			print_string(" (");
+			itoa(num_nodes_per_ch[i], buf, 10); print_string(buf);
+			print_string(" nodes   ");
+		}
+
+		print_string("\r\n\r\n[1] Assign new node IDs");
 		print_string("\r\n[2] Send custom message");
 		print_string("\r\n[3] Locate node");
-		print_string("\r\n[4] RS232 bridge mode w/ CRC generation");
-		print_string("\r\n[5] Re-zero current sensor offset");
-		print_string("\r\n[6] Set current integrator value");
+		print_string("\r\n[4] Re-zero current sensor offset");
+		print_string("\r\n[5] Set current integrator value");
 
 		print_string("\r\n[x] Save configuration (don't forget!)");
 		print_string("\r\n[y] Reload configuration (undo changes)");
@@ -763,31 +792,34 @@ void config()
 			int16_t val = uart_read_int16();
 			if(val < config_limit_mins[key-'a'] || val > config_limit_maxs[key-'a'])
 			{
-				print_string(" OUT OF RANGE\r\n");
+				print_string("  OUT OF RANGE\r\n");
 				goto NEW_PROMPT;
 			}
 			switch(key-'a')
 			{
 				case 0: num_nodes = val; break;
-				case 1: hvc_limit = val; break;
-				case 2: lvc_limit_ocv = val; break;
-				case 3: overtemp_limit = C2K(val); break;
-				case 4: charge_temp_limit = C2K(val); break;
-				case 5: unclear_time_limit = val; break;
-				case 6: lvc_filter_limit = val; break;
-				case 7: balancer_unit_seconds = val; break;
-				case 8: temperature_poll_rate = val; break;
-				case 9: pack_capacity_Ah = val; break;
-				case 10: over_SoC_limit = val; break;
-				case 11: timeout_per_node = val*534; break;
-				case 12: shunt_limit = val; break;
-				case 13: invert_current = val; break;
-				case 14: bat_heater_temp_limit = C2K(val); break;
-				case 15: wh_per_km = val; break;
-				case 16: balancer_low_v_point = val; break;
-				case 17: balancer_high_v_point = val; break;
-				case 18: adc_offset = val; break;
-				case 19: adc_divider = val; break;
+				case 1: channel_start_idxs[0] = val; break;
+				case 2: channel_start_idxs[1] = val; break;
+				case 3: channel_start_idxs[2] = val; break;
+				case 4: channel_start_idxs[3] = val; break;
+				case 5: hvc_limit = val; break;
+				case 6: lvc_limit_ocv = val; break;
+				case 7: overtemp_limit = C2K(val); break;
+				case 8: charge_temp_limit = C2K(val); break;
+				case 9: unclear_time_limit = val; break;
+				case 10: lvc_filter_limit = val; break;
+				case 11: balancer_unit_seconds = val; break;
+				case 12: temperature_poll_rate = val; break;
+				case 13: pack_capacity_Ah = val; break;
+				case 14: over_SoC_limit = val; break;
+				case 15: timeout_per_node = val*534; break;
+				case 16: shunt_limit = val; break;
+				case 17: bat_heater_temp_limit = C2K(val); break;
+				case 18: wh_per_km = val; break;
+				case 19: balancer_low_v_point = val; break;
+				case 20: balancer_high_v_point = val; break;
+				case 21: adc_offset = val; break;
+				case 22: adc_divider = val; break;
 				default: break;
 			}
 		}
@@ -884,15 +916,11 @@ void config()
 		}
 		else if(key == '4')
 		{
-			bridge_mode(1);
-		}
-		else if(key == '5')
-		{
 			print_string("\r\nMeasuring...");
 			zero_I_offset();
 			print_string(" adc_offset set. Check and save if happy.\r\n");
 		}
-		else if(key == '6')
+		else if(key == '5')
 		{
 			print_string("Enter Ah (-999 to 999): ");
 			int16_t val = uart_read_int16();
@@ -954,9 +982,6 @@ ISR(ADC_vect)
 	raw_I_acc += val;
 	val -= adc_offset;
 	val /= adc_divider;
-
-	if(invert_current)
-		val *= -1;
 
 	if(val > max_I_tmp)
 		max_I_tmp = val;
@@ -1033,49 +1058,154 @@ inline void calc_range()
 
 void init_can()
 {
-	// Initialize message objects as "disabled"
-	for(uint8_t i; i < 15; i++)
-	{
-		CANPAGE = (i << 4);
-		CANCDMOB = 0b00000000;
-	}
+	CANGCON |= (1 << SWRES);
 
-	// 250 kbps, 0.250 us TQ
-	CANBT1 = 0x02;
+	// 125 kbps
+//	CANBT1 = 0x06;
+//	CANBT2 = 0x0c;
+//	CANBT3 = 0x37;
+
+	// 250 kbps
+	CANBT1 = 0x06;
 	CANBT2 = 0x0c;
 	CANBT3 = 0x37;
 
 	CANTCON = 100; // CAN timer prescaler - count at 10 kHz (0.1 ms resolution)
 
+	// Initialize message objects as "disabled"
+	for(uint8_t i = 0; i < 15; i++)
+	{
+		CANPAGE = (i << 4);
+		CANCDMOB &= 0; // read-write might be required.
+		CANSTMOB &= 0;
+	}
+
 	CANGCON = 0b00000010; // Controller enable command
 
+//	while(!(CANGSTA & 0b100)) // check if really enabled
+//		;
 
-//	(CANGSTA & 0b100) // check if really enabled
 }
 
-uint8_t send_can_shit(uint16_t id, uint8_t* data, uint8_t datalen)
+uint8_t send_can(uint8_t mob, uint8_t extended, uint32_t id, uint8_t* data, uint8_t datalen)
 {
-	//can.Message(arbitration_id=0x301, data=[0, 0, 10, 10, 80, 0, 0, 0], extended_id=False) bus.send(msg)
-	//can.Message(arbitration_id=0x302, data=[0, 0, 0, 0, 8, 8, 20, 20], extended_id=False) bus.send(msg)
-	//can.Message(arbitration_id=0x303, data=[15, 15, 5, 5, 0b11, 0, 0, 0], extended_id=False) bus.send(msg)
-	if(datalen > 8)
+	if(datalen > 8 || mob < 0 || mob > 7)
 		return 1;
 
+	uint16_t timeout = 65535;
+	while(CANEN2 & (1 << mob)) if(!timeout--) return 1;
 
-	uint8_t mob = 0;
+	CANPAGE = mob << 4; // goes to MOB, sets fifo pointer to 0, autoincrement on.
 
-	CANPAGE = (mob << 4) | (0); // goes to MOB, sets fifo pointer to 0, autoincrement on.
+	CANSTMOB &= 0;
 
-	CANCDMOB = 0b0100 | datalen;
+	CANCDMOB = datalen;
 
-	CANIDT1 = (id>>3)&0xff;
-	CANIDT2 = (id&0b111)<<5;
-	CANIDT4 = (0 << 2) | (0); // RTR & RB0 bits.
+	if(extended)
+	{
+		CANCDMOB |= (1 << 4); // extended ID
+
+		CANIDT4 = (id & 0b11111) << 3; // RTR, RB1, RB0 set as zero.
+		CANIDT3 = (id >> 5)&0xff;
+		CANIDT2 = (id >> 13)&0xff;
+		CANIDT1 = (id >> 21)&0xff;
+	}
+	else
+	{	// 11-bit addressing:
+		CANIDT1 = (id>>3)&0xff;
+		CANIDT2 = (id&0b111)<<5;
+		CANIDT3 = 0;
+		CANIDT4 = 0; // RTR & RB0 bits.
+	}
+
 
 	for(uint8_t i = 0; i < datalen; i++)
 	{
 		CANMSG = data[i];
 	}
+
+	CANCDMOB |= 0b01000000;
+
+	return 0;
+}
+
+typedef union
+{
+	uint16_t u16;
+	int16_t s16;
+	struct {uint8_t first; uint8_t second;};
+	uint16_t block[2];
+} union16_t;
+
+uint16_t batt_voltage_min_discharge = 1500;
+uint16_t batt_voltage_max_charge = 3650;
+uint16_t batt_current_max_charge = 150;
+uint16_t batt_current_max_discharge = 800;
+uint16_t cur_pack_v = 3300;
+uint16_t cur_pack_i = 0;
+uint16_t cur_soc = 500;
+
+//V = 330, MAXI = 80, Vmin = 150, maxV = 365, max_charge = 15, Imeas = 0, DOD = 50, 
+void zytek_pulse(uint16_t voltage, uint16_t current, uint16_t soc)
+{
+//	uint8_t zytek_msgs[3][8] = {
+//	{0x00, 0x00, 0xf0, 0x0a, 0x00, 0x00, 0x00, 0x00},
+//	{0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0x64, 0x00},
+//	{0x00, 0xb0, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00}};
+
+	uint8_t zytek_msg[8];
+	zytek_msg[0] = current.first;
+	zytek_msg[1] = current.second;
+	zytek_msg[2] = voltage.first;
+	zytek_msg[3] = voltage.second;
+	zytek_msg[4] = soc.first;
+	zytek_msg[5] = soc.second;
+	zytek_msg[6] = 0;
+	zytek_msg[7] = 0;
+
+	send_can(0, 0, 0x301, zytek_msg, 8);
+
+	zytek_msg[0] = 0; // General error active bit 0 - other bits undefined
+	zytek_msg[1] = 0; // Limp home mode bit 0 - other bits undefined
+	zytek_msg[2] = 0; // Isolation error bit 0 - other bits undefined
+	zytek_msg[3] = 0;
+	*((uint16_t*)(&zytek_msg[4])) = batt_voltage_min_discharge;
+	*((uint16_t*)(&zytek_msg[6])) = batt_current_max_discharge;
+
+	send_can(0, 0, 0x302, zytek_msg, 8);
+
+	*((uint16_t*)(&zytek_msg[0])) = batt_voltage_max_charge;
+	*((uint16_t*)(&zytek_msg[2])) = batt_current_max_charge;
+
+	zytek_msg[4] = 0b100; // disable regen, enable discharge
+	zytek_msg[5] = 0;
+	zytek_msg[6] = 0;
+	zytek_msg[7] = 0;
+
+	send_can(0, 0, 0x303, zytek_msg, 8);
+
+}
+
+
+#define PSU_CAN_MOB 0
+#define PSU_CAN_EXTENDED 1
+#define PSU_CAN_ID 0x0240f010
+
+
+// Voltage in 0.1V
+// Current in 0.1A
+void psu_pulse(uint8_t enable, int16_t voltage, int16_t current)
+{
+	voltage /= 10;
+	current *= 15;
+	if(voltage < 0)   voltage = 0;
+	if(voltage > 255) voltage = 255;
+	if(current < 0)   current = 0;
+	if(current > 255) current = 255;
+
+//	uint8_t can_data[3] = {enable, current, voltage};
+	uint8_t can_data[3] = {0x01, 10, 10};
+	send_can(PSU_CAN_MOB, PSU_CAN_EXTENDED, PSU_CAN_ID, can_data, 3);
 }
 
 int main()
@@ -1095,10 +1225,10 @@ int main()
 	PORTE = 0b11111011; // Pullups to INTn pins and unused pins.
 //	DDRF  = 0b11111000; // 7..4 GPO driver outputs, nLEM_ENA, unused, ADC differential pins.
 //	PORTF = 0b00000100; // LEM power enable. Pull-up to unused pin.
-//	DDRG  = 0b00000010; // PG4,3 = 32kHz osc, PG2&0 = unused, PG1 = CAN_RS
-//	PORTG = 0b00000101; // Pullup to unused pins.
+	DDRG  = 0b00000010; // PG4,3 = 32kHz osc, PG2&0 = unused, PG1 = CAN_RS
+	PORTG = 0b00000101; // Pullup to unused pins.
 
-	UBRR1 = 8; // 8 MHz 115200 bps, remember to use 2x
+	UBRR1 = 16; // 16 MHz 115200 bps, remember to use 2x
 	UCSR1A = 0b00000010; // 2x mode.
 	// 8 data bits, 1 stop bit, no parity bit
 	UCSR1C = 0b00000110;
@@ -1125,7 +1255,34 @@ int main()
 //	load_bal_eeprom();
 //	last_clock_when_updated_balancer = balancer_unit_seconds - 2;
 
+	init_can();
+
 	print_string("BMS Master started.\r\n");
+
+	while(1)
+	{
+
+		print_char('.');
+		//V = 330, MAXI = 80, Vmin = 150, maxV = 365, max_charge = 15, Imeas = 0, DOD = 50, 
+		union16_t volt;
+		union16_t curr;
+		union16_t soc;
+		volt.u16 = 3300;
+		curr.u16 = 0;
+		soc.u16 = 500;
+		zytek_pulse(volt, curr, soc);
+
+		_delay_ms(100);
+/*		uint8_t can_data[3] = {0x01, 0x10, tv};
+		send_can_shit(1, 0x0240f010, can_data, 3);
+		_delay_ms(2000);
+		tv += 3;
+		if(tv > 100)
+			tv = 20;
+*/
+	}
+
+
 
 	clock = 0;
 	sei();
@@ -1133,14 +1290,14 @@ int main()
 	while(1)
 	{
 
-		data_t adata;
+/*		data_t adata;
 		adata.a = 0xff;
 		adata.b = 0b10001100;
 		adata.c = 0x00;
 		cli();
 		manchester_send(&adata);
 		sei();
-
+*/
 		if(clock%temperature_poll_rate == 0)
 		{
 			_delay_ms(7);
